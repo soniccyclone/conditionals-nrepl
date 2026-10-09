@@ -1,0 +1,32 @@
+#+TITLE: Plan: nREPL on reader conditionals, ClojureCLR first
+#+OPTIONS: ^:nil toc:2
+
+Planning only. No source files changed. Branch =plan/clr-reader-conditionals=, directory =plan/=. Date 2026-10-09, base =d00d171= (post 1.8.0).
+
+* Summary
+Convert =src/clojure/nrepl/**.clj= to =.cljc= with =#?(:clj … :cljr …)= and a thin set of host seams (=nrepl.host.*=) so one tree yields a full nREPL on ClojureCLR 1.12.6 inside a Godot 4 (.NET 8) C# project. JVM behaviour is preserved and each refactor is shaped as an upstreamable PR you submit by hand. CLJS and jank are kept possible by the seam rules and otherwise untouched.
+- 68 files, 9 702 LOC audited; 1 089 host-coupled sites; 21 files need a seam, 15 need a few inline conditionals, 11 rename as-is, 9 Java classes need =proxy=/C# replacements, 12 artifacts are JVM-only.
+- Estimated 22–29 person-days across 4 phases; first CIDER connection to Godot after phase 2 (≈15–19 d).
+- Hard facts that shape it: =:cljr= feature and =.cljr > .cljc > .clj= load order; =[ThreadStatic]= bindings; no =Thread.Abort= on .NET 8+ (=ControlledExecution.Run= is the only forced abort); Godot scene tree is main-thread-only; the editor's collectible ALC fights long-lived threads and dynamic assemblies.
+
+* Files
+| File | Content |
+|---+---|
+| [[file:01-current-anatomy.org][01-current-anatomy]] | per-file verdicts, Java classes, consolidated cross-cutting concerns with =file:line= |
+| [[file:02-target-facts.org][02-target-facts]] | ClojureCLR, .NET, Godot and client facts with sources |
+| [[file:03-architecture-options.org][03-architecture-options]] | options A–E, scoring, recommended synthesis, dialect-extensibility rule |
+| [[file:04-subsystems.org][04-subsystems]] | per-subsystem options, trade-offs, defaults |
+| [[file:05-roadmap.org][05-roadmap]] | phases, PR slices, verification matrix, effort |
+| [[file:06-decisions-risks.org][06-decisions-risks]] | 15 decisions for you, 13 risks, NOGO list |
+| [[file:07-prior-art.org][07-prior-art]] | =clr.tools.nrepl= (incl. its partial nrepl port), ArcadiaGodot, Arcadia, ClojureCLR source facts |
+
+* Decisions needed before phase 1 starts
+D3 interrupt policy, D5 proxy vs C#, D11 file strategy, D12 Godot ALC placement, D15 upstream cadence. The rest can wait for phase 2. See =06-decisions-risks.org=.
+
+* Constraints honored
+- No read or write against =nrepl/nrepl=; the fork's upstream-pointing automation is listed for removal in phase 0.
+- Nothing under =src/=, =test/=, =build/= or =doc/= was modified.
+
+* Method and limits
+- Eight audit agents read every file; three research sweeps (runtime, IO/net, tooling; Godot, prior art, cljc patterns) with two refutation passes each; a four-architect design panel was started and cut short for budget. Facts the refuters could not confirm from this sandbox are marked unverified.
+- The sourcehut skill =~nathanb/claude-org-planning= and =clojure.org= were unreachable from this sandbox's egress policy; the format here is plain org that GitHub renders.
