@@ -1,0 +1,11 @@
+# ClojureCLR 1.12.6 on .NET 8 SDK, for verifying the plan's target facts.
+# Build:  podman build -t nrepl-clr -f plan/verify/Containerfile.clr plan/verify
+# Run:    podman run --rm -it --security-opt label=disable -v "$PWD":/work -w /work nrepl-clr Clojure.Main -e '(println *clojure-version*)'
+FROM mcr.microsoft.com/dotnet/sdk:8.0
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_NOLOGO=1 \
+    PATH="${PATH}:/root/.dotnet/tools"
+RUN dotnet tool install --global Clojure.Main --version 1.12.6 \
+ && dotnet tool install --global Clojure.Cljr --version 0.1.0-beta1 \
+ && Clojure.Main -e '(println "ClojureCLR" *clojure-version* "on" (System.Runtime.InteropServices.RuntimeInformation/FrameworkDescription))'
+WORKDIR /work

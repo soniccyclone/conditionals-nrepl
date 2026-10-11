@@ -1,0 +1,41 @@
+#+TITLE: Verification harness for the ClojureCLR plan
+#+OPTIONS: ^:nil toc:nil
+
+Containers that reproduce every empirical claim in =plan/*.org=. Nothing here is loaded by the library or the JVM test suite. Rootless podman on a SELinux host: mount with =--security-opt label=disable= rather than =:Z= so the project files are not relabeled.
+
+* Images
+| Image | Containerfile | Contents | Build |
+|---+---+---+---|
+| =nrepl-clr= | [[file:Containerfile.clr][Containerfile.clr]] | .NET 8 SDK, =Clojure.Main= 1.12.6, =cljr= 0.1.0-beta1 | =podman build -t nrepl-clr -f plan/verify/Containerfile.clr plan/verify= |
+| =nrepl-jvm= | [[file:Containerfile.jvm][Containerfile.jvm]] | Temurin 21, Clojure CLI, make, gcc | =podman build -t nrepl-jvm -f plan/verify/Containerfile.jvm plan/verify= |
+
+* Running ClojureCLR experiments
+An experiment is a directory holding a load path (=lp/=) and a script. The load path is handed to ClojureCLR through =CLOJURE_LOAD_PATH= (no classpath on the CLR; the variable is split on =Path.PathSeparator=, =:= on Linux). Always bound the run: =--timeout= kills the container, =timeout= kills the client.
+
+#+begin_src sh
+mkdir -p exp/lp/foo
+printf '(ns foo.a)\n(def which :cljc)\n' > exp/lp/foo/a.cljc
+printf '(require (quote foo.a)) (println foo.a/which)\n' > exp/run.cljc
+timeout 180 podman run --rm --timeout 150 --security-opt label=disable \
+  -v "$PWD/exp":/exp -w /exp -e CLOJURE_LOAD_PATH=/exp/lp \
+  nrepl-clr Clojure.Main -i /exp/run.cljc
+#+end_src
+
+- =-i file= loads a file; =-e '(...)'= evaluates a string; =-m ns= runs =-main=. The driver script must be =.cljc= if it uses =#?=; a =.clj= or =.cljr= file rejects reader conditionals.
+- To load this repo's sources, mount the repo and point the load path at a copy where files have been renamed to =.cljc= (ClojureCLR will load =.clj= too, but =#?= is only honoured in =.cljc=).
+- Interop you will need: =(gen-delegate System.Threading.ThreadStart [] ...)= for thread starts, =(sys-action [] ...)=, =|System.Collections.Concurrent.BlockingCollection`1[System.Object]|= for generic type names, =(by-ref x)= for =out= parameters, =^|System.Byte[]|= hints to pick the byte-array overload over =Span=.
+- C# experiments: =dotnet new console -o /exp/cs && dotnet run --project /exp/cs= inside the same image (SDK present, NuGet reachable).
+
+* Running the JVM baseline
+#+begin_src sh
+mkdir -p "$HOME/.m2"
+podman run --rm --security-opt label=disable -v "$PWD":/work -v "$HOME/.m2":/root/.m2 -w /work nrepl-jvm make test
+podman run --rm --security-opt label=disable -v "$PWD":/work -v "$HOME/.m2":/root/.m2 -w /work nrepl-jvm make lint
+#+end_src
+
+* Files
+| File | Purpose |
+|---+---|
+| [[file:claims.org][claims.org]] | every empirical claim the plan makes, with its test method and the verdict after verification |
+| [[file:results.org][results.org]] | verification report: per-claim verdicts, evidence, and what changed in the plan |
+| [[file:threadnames.clj][threadnames.clj]] | PR 4 acceptance helper: prints the normalised multiset of nREPL thread names |

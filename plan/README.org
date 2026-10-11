@@ -1,32 +1,35 @@
 #+TITLE: Plan: nREPL on reader conditionals, ClojureCLR first
-#+OPTIONS: ^:nil toc:2
+#+OPTIONS: ^:nil toc:2 num:nil
+#+DATE: 2026-10-11
 
-Planning only. No source files changed. Branch =plan/clr-reader-conditionals=, directory =plan/=. Date 2026-10-09, base =d00d171= (post 1.8.0).
+Planning only; nothing under =src/=, =test/=, =build/= or =doc/= is changed on this branch. Base =d00d171= (post-1.8.0). Second revision, 2026-10-11: the game-engine framing of the first draft is gone, 91 empirical claims were run in a container and adversarially refuted, the interrupt decision follows Nathan's call for a real forced stop, a Sonnet dry run implemented PR 4 from the spec, and four reviews (upstream maintainer, CLR API, test impact, interop coverage) were folded in.
 
-* Summary
-Convert =src/clojure/nrepl/**.clj= to =.cljc= with =#?(:clj … :cljr …)= and a thin set of host seams (=nrepl.host.*=) so one tree yields a full nREPL on ClojureCLR 1.12.6 inside a Godot 4 (.NET 8) C# project. JVM behaviour is preserved and each refactor is shaped as an upstreamable PR you submit by hand. CLJS and jank are kept possible by the seam rules and otherwise untouched.
-- 68 files, 9 702 LOC audited; 1 089 host-coupled sites; 21 files need a seam, 15 need a few inline conditionals, 11 rename as-is, 9 Java classes need =proxy=/C# replacements, 12 artifacts are JVM-only.
-- Estimated 22–29 person-days across 4 phases; first CIDER connection to Godot after phase 2 (≈15–19 d).
-- Hard facts that shape it: =:cljr= feature and =.cljr > .cljc > .clj= load order; =[ThreadStatic]= bindings; no =Thread.Abort= on .NET 8+ (=ControlledExecution.Run= is the only forced abort); Godot scene tree is main-thread-only; the editor's collectible ALC fights long-lived threads and dynamic assemblies.
+* Goal
+Convert =src/clojure/nrepl/**.clj= to =.cljc= with =#?(:clj … :cljr …)= plus a thin set of host seams in the existing =nrepl.util.*= namespaces, so one source tree yields a full nREPL (sessions, interrupt with forced stop, stdin, print, completion, lookup, load-file, describe) on ClojureCLR 1.12.6 / .NET 8+, started with =Clojure.Main -m nrepl.cmdline= or =nrepl.server/start-server= from any .NET process. JVM behaviour is preserved and each phase-1 refactor is an upstreamable PR that Nathan submits by hand. CLJS and jank stay possible and otherwise untouched.
 
 * Files
 | File | Content |
 |---+---|
-| [[file:01-current-anatomy.org][01-current-anatomy]] | per-file verdicts, Java classes, consolidated cross-cutting concerns with =file:line= |
-| [[file:02-target-facts.org][02-target-facts]] | ClojureCLR, .NET, Godot and client facts with sources |
-| [[file:03-architecture-options.org][03-architecture-options]] | options A–E, scoring, recommended synthesis, dialect-extensibility rule |
-| [[file:04-subsystems.org][04-subsystems]] | per-subsystem options, trade-offs, defaults |
-| [[file:05-roadmap.org][05-roadmap]] | phases, PR slices, verification matrix, effort |
-| [[file:06-decisions-risks.org][06-decisions-risks]] | 15 decisions for you, 13 risks, NOGO list |
-| [[file:07-prior-art.org][07-prior-art]] | =clr.tools.nrepl= (incl. its partial nrepl port), ArcadiaGodot, Arcadia, ClojureCLR source facts |
+| [[file:01-findings.org][01-findings]] | what the code does today, with the corrections from loading eight namespaces on ClojureCLR |
+| [[file:02-facts.org][02-facts]] | the ClojureCLR / .NET 8 / tooling facts the design relies on, each with its verified status |
+| [[file:03-design.org][03-design]] | the spec: seam signatures with JVM and CLR bodies, the exact proxy shapes, the interrupt policy, the eval/interrupt diagram, the inline =#?= sites per file |
+| [[file:04-roadmap.org][04-roadmap]] | work orders per slice: files, steps, tests to add, acceptance, upstream PR shape |
+| [[file:05-decisions.org][05-decisions]] | decision register D1–D17 with evidence and recommendations, risks, NOGO |
+| [[file:06-prior-art.org][06-prior-art]] | clr.tools.nrepl and ClojureCLR source facts |
+| [[file:verify/README.org][verify/]] | the containers, the claims register with verdicts, the verification results, the thread-name acceptance script |
 
-* Decisions needed before phase 1 starts
-D3 interrupt policy, D5 proxy vs C#, D11 file strategy, D12 Godot ALC placement, D15 upstream cadence. The rest can wait for phase 2. See =06-decisions-risks.org=.
+* Decisions needed from Nathan
+D3 (interrupt) is decided. Before phase 1 starts: D11 (file strategy), D14 (rename timing), D15 (upstream cadence), D16 (editing the generated compliment copy), D17 (command-line entry). Before phase 2: D1, D2, D5, D6, D8, D9, D13. Can wait: D7, D10. The register in [[file:05-decisions.org][05-decisions]] has a blank *Decision* cell per item and a recommendation for each.
 
-* Constraints honored
-- No read or write against =nrepl/nrepl=; the fork's upstream-pointing automation is listed for removal in phase 0.
-- Nothing under =src/=, =test/=, =build/= or =doc/= was modified.
+* Headline numbers
+- 68 files audited; the audit's 1 089 host sites are a lower bound (=transport= is ~78 sites, not 54; =completion= is 166 host forms, not 78; =misc= and =spec= are lighter than audited).
+- 91 claims verified in the =nrepl-clr= container (ClojureCLR 1.12.6 on .NET 8.0.31): see the totals line in [[file:verify/results.org][verify/results.org]]; two claims were refuted outright (=B9=: ClojureCLR's =clojure.string= is culture-sensitive too; =J5=: clj-kondo cannot lint =:cljr= branches) and several were partial in ways that changed the design (AOT needs net9+, the stdin proxy's =Peek= rules, the forced-stop exception types, =deps-clr.edn= replaces =deps.edn=).
+- 21 person-days over four phases; first editor connection to a ClojureCLR nREPL after slice 15, about day 16.
+- JVM baseline at =df1ed8a= in the =nrepl-jvm= container: 178 tests, 0 failures; lint clean.
 
-* Method and limits
-- Eight audit agents read every file; three research sweeps (runtime, IO/net, tooling; Godot, prior art, cljc patterns) with two refutation passes each; a four-architect design panel was started and cut short for budget. Facts the refuters could not confirm from this sandbox are marked unverified.
-- The sourcehut skill =~nathanb/claude-org-planning= and =clojure.org= were unreachable from this sandbox's egress policy; the format here is plain org that GitHub renders.
+* Method
+- Code read in full by the planner; eight audit agents in the first draft.
+- One agent per claim batch ran experiments in the container; two independent skeptics per thread-semantics claim and per refuted or plan-changing claim; a completeness pass listed what the register missed.
+- A Sonnet agent implemented PR 4 from the spec in a throwaway worktree: three blockers (kondo config, the reaper's executor, a test's private var) and a start-order race were found and are now in the work order; with the fixes it reached a green suite in one run.
+- Four review lenses on the design and roadmap; their findings are folded in and the planner's rulings are recorded in 03-design §Shape and 05-decisions.
+- Rendering: the docs follow the org-plan skill format; render with Emacs + htmlize (the =org-render= container used here mirrors the skill's build file).

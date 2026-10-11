@@ -1,0 +1,145 @@
+#+TITLE: 5. Decisions, risks, NOGO
+#+OPTIONS: ^:nil toc:2 num:nil
+#+DATE: 2026-10-11
+#+TODO: DECIDE RISK | DONE REMOVED
+
+Ids are stable across revisions; D4 and D12 are removed (game-engine hosting, out of scope). Fill the *Decision* cell; the roadmap assumes the recommendation unless a cell says otherwise. Evidence ids refer to [[file:verify/claims.org][verify/claims.org]].
+
+* Decision register
+** DONE D3. Interrupt of a CPU-bound eval
+Decided by Nathan on 2026-10-11: forced stop is the primary mechanism, mirroring the JVM's =interrupt-stop= (interrupt, wait 5 s, kill). The CLR kill primitive is =System.Runtime.ControlledExecution.Run= (=TH5=, =TH6=, =TH7=), driven by a re-interrupt plus =Cancel= from a dedicated reaper thread. Only an opt-out key =:force-interrupt= (default true). Spec in [[file:03-design.org::*Interrupt policy (D3, decided: forced stop is primary)][03-design §Interrupt policy]].
+
+** DECIDE D1. Thread model for the long-lived loops (accept, per-connection handle, transport reader, session)
+| Option | For | Against |
+|---+---+---|
+| (a) dedicated =Thread= per loop, =IsBackground=true= (recommended) | =Interrupt= has a target; no =ThreadPool= starvation; the JVM's cached pool gives each blocking loop its own thread anyway | one OS thread per connection and per session, as today |
+| (b) =Task.Factory.StartNew= with =LongRunning= | idiomatic | owns a dedicated thread anyway; =Interrupt= needs the thread object (=C9=) |
+| (c) =ThreadPool= | cheap | infinite loops starve the pool; interrupts cannot target a pool thread |
+Evidence: =TH1=, =TH12=, =C4=. Recommendation: (a). Decision:
+
+** DECIDE D2. Executor for short tasks and for ephemeral evals
+| Option | For | Against |
+|---+---+---|
+| (a) =handle-executor= on =ThreadPool.QueueUserWorkItem= with a catch-all wrapper; =ephemeral-executor= and the per-connection loop on dedicated threads (recommended) | matches the JVM cached pool for the short work; user evals (ephemeral) and infinite loops never touch the pool, so a few blocked evals cannot starve =interrupt= / =describe= handling | pool threads are unnamed; an uncaught exception on any thread kills the process, hence the wrapper (=TH13=) |
+| (b) everything on the pool | fewest threads | the .NET pool injects about one thread per 500 ms once blocked: ProcessorCount blocked ephemeral evals hang the server (CLR review) |
+| (c) one consumer thread per transport for =handle*= | ordered =:out= chunks | behaviour change vs the JVM |
+Evidence: =TH13=, =C9=, dry run. Recommendation: (a). Decision:
+
+** DECIDE D5. Replacement for the Java helper classes (=QueuePollingReader=, =CallbackBufferedOutputStream=, =QuotaBoundWriter=, =TeeOutputStream=)
+| Option | For | Against |
+|---+---+---|
+| (a) ClojureCLR =proxy= over =TextReader= / =TextWriter= (recommended) | no build step; measured ~15 ns per =Write(char)= in steady state, ~25 ns per =Write(string)= (=C3=), far above what a transport pushes; the exact shapes are specified (=C1=, =C2=, =E10=) | the proxy's generated =Span= overloads throw =InvalidProgramException= if any caller uses them (nothing in nREPL or ClojureCLR does); proxies need =locking= |
+| (b) C# classes in a =src/csharp= assembly | ~4 ns per call; real =Span= overloads | adds =dotnet build= to the library; NuGet packaging of mixed content |
+| (c) (a) now, (b) only if a =Span= caller appears | | |
+Recommendation: (c). Decision:
+
+** DECIDE D6. Wire-visible exception names (=:ex=, =:root-ex=)
+| Option | For | Against |
+|---+---+---|
+| (a) =(str (class e))= on both hosts: ="System.ArgumentException"= on the CLR (recommended) | the existing expression is already portable (=B6=); zero code | clients that regex on ="class java.lang"= (none known among CIDER, Calva, Conjure) would miss |
+| (b) emulate the ="class "= prefix | keeps the shape | lies about the type |
+Recommendation: (a); tests carry per-host expectation tables. Decision:
+
+** DECIDE D7. TLS timing
+| Option | For | Against |
+|---+---+---|
+| (a) stub in phase 2, =SslStream= in phase 3 (recommended) | first editor connection sooner; the handshake with mutual auth and =CustomRootTrust= is proven feasible (=F7=) | a =--tls= user on the CLR gets a clear error until slice 16 |
+| (b) port in phase 2 | parity sooner | PEM/PFX on Windows (=R6=) is the real cost |
+Recommendation: (a). Decision:
+
+** DECIDE D8. Type-name spelling in completion and lookup on the CLR
+| Option | For | Against |
+|---+---+---|
+| (a) ClojureCLR's own: =Outer+Inner=, =List`1= (recommended) | what the user types; =(str type)= gives it (=B6=) | per-host expectation tables in =completion_test= |
+| (b) Java-like rewriting | identical expectations | names that do not resolve |
+Recommendation: (a). Decision:
+
+** DECIDE D9. =matcher-combinators= on the CLR
+Measured usage: 198 =is+= assertions in 12 files, 7 namespaces require =matcher-combinators.matchers= directly, 12 distinct matcher shapes (test-impact review).
+| Option | For | Against |
+|---+---+---|
+| (a) =nrepl.test-helpers.match= (~200 lines, all 12 shapes, readable mismatch report) plus a CLR-only =matcher_combinators/matchers.cljr= stub so the 7 files load unchanged (recommended) | 12 test files untouched; the JVM keeps the real library | ~1 day; a mismatch report less rich than the library's |
+| (b) rewrite the 198 assertions with plain =is= | no shim | large upstream-visible test diff |
+| (c) port =matcher-combinators= to ClojureCLR | full fidelity | a separate project |
+Recommendation: (a), budgeted in slice 9. Decision:
+
+** DECIDE D10. Distribution of the CLR library
+| Option | For | Against |
+|---+---+---|
+| (a) git dep via =cljr= now (=deps-clr.edn=, =J1=), NuGet =clojure.nrepl= at the first tagged CLR release (recommended) | zero packaging work until stable | consumers need git; the version string is ="" = until the packager writes it |
+| (b) NuGet from the start | discoverable | packager csproj + versioning before anything is stable |
+| (c) vendor into the consuming project | simplest for one user | no update path |
+Recommendation: (a). Decision:
+
+** DECIDE D11. File strategy
+| Option | For | Against |
+|---+---+---|
+| (a) seams in the existing =nrepl.util.*= namespaces (=.cljc= façade + =*/jvm.clj= + =*/clr.cljr=), and sibling =.cljr= files only where the two hosts share nothing (=socket=, =tls=, =cmdline= entry) (recommended) | JVM diff is moved code plus call-site edits; no parallel namespace tree; a third dialect adds one file per seam; =.cljr= files are invisible to the JVM, kondo and kaocha (=A3=, =J5=, =J6=) | the sibling files for =socket= / =tls= / =cmdline= duplicate nothing but must be kept in step with the contract table |
+| (b) inline =#?= everywhere | no new namespaces | =transport= (~78 sites, =L5=), =completion= (166 host forms, =L7=), =tls= (60), =cmdline= (61) become unreadable; =L7= needed 21 iterations and 31 sites just to load =completion= |
+| (c) =.cljr= override files for shared logic | fastest prototype | whole namespaces drift from upstream; a =.cljr= cannot use =#?= (=A2=) |
+| (d) kernel/host rewrite | cleanest for a third dialect | a different project; no upstream path |
+Scoring (10 best): (a) mergeability 8, CLR fit 8, time to first eval 6, fork-sync 8, third dialect 8, tests 8, risk 7 = 53; (b) 5/6/5/3/4/5/5 = 33; (c) 4/7/9/3/2/3/5 = 33; (d) 3/7/3/6/10/9/4 = 42. Recommendation: (a). Decision:
+
+** DECIDE D13. =describe= versions key for the host
+| Option | For | Against |
+|---+---+---|
+| (a) =:clr= plus =:aux {:host {:name "jvm"|"clr" :can-stop-threads bool}}= on both hosts (recommended) | truthful; =nrepl.spec= allows any keyword; clients can hide forced interrupt when the host cannot stop threads | a visible =describe= change on the JVM (=verbose-describe= pins it) |
+| (b) reuse =:java= with .NET data | no client changes | lies |
+Recommendation: (a). Decision:
+
+** DECIDE D14. When to rename =.clj= → =.cljc=
+| Option | For | Against |
+|---+---+---|
+| (a) in the seam PR that empties the file of interop (recommended) | each PR self-contained; =git log --follow= works | rename noise in every PR |
+| (b) one rename PR at the end | pure moves first | a 25-file rename PR |
+Recommendation: (a) for files a seam PR empties, PR 8 for the rest. Decision:
+
+** DECIDE D15. Upstream cadence
+| Option | For | Against |
+|---+---+---|
+| (a) submit every phase-1 PR as it lands | small reviews | seams "for a platform we don't ship" with no second host loading them (=R1=; the upstream review rates this the likeliest rejection) |
+| (b) PRs 1, 1b, 3 and 2 as they land; PRs 4–8 once the CLR branch is green and linked as evidence (recommended) | the unconditional wins go first; the seams arrive with proof | the fork carries 4–8 unmerged for a few weeks |
+Recommendation: (b). Decision:
+
+** DECIDE D16. Editing the generated compliment-lite copy (PR 2)
+=nrepl.util.completion= is generated from =alexander-yakushev/compliment=; a regeneration would revert hand edits (upstream review).
+| Option | For | Against |
+|---+---+---|
+| (a) edit the fork's copy now and offer the same string/regex change to compliment in parallel (recommended) | the fork is not blocked; upstream nREPL can later regenerate from a compliment that carries the change | two places to land |
+| (b) wait for compliment | one place | blocks slice 13 on a third party |
+Recommendation: (a). Decision:
+
+** DECIDE D17. Command-line entry on the CLR
+| Option | For | Against |
+|---+---+---|
+| (a) extract =nrepl.cmdline.options= (=.cljc=, pure parsing and messages) from =cmdline.clj= as an upstream refactor; =cmdline.clj= stays JVM; the CLR ships =cmdline.cljr= (server-only =-main=) (recommended) | the 61-site file is untouched beyond the extraction; no =#?= in it; the CLR entry is ~60 lines | one more namespace upstream |
+| (b) =cmdline.clj= becomes =.cljc= with the client half under =#?(:clj …)= | one file | ~40 gated sites in the most host-coupled file; =#?= blocks around =run-repl= and signals |
+Recommendation: (a). Decision:
+
+** REMOVED D4, D12
+Game-engine hosting. Out of scope.
+
+* Risks
+| Id | Risk | Likelihood | Mitigation |
+|---+---+---+---|
+| R1 | Upstream rejects host seams as scope creep | medium | D15 (b); PRs 1, 1b, 3, 2 are unconditional wins; seams arrive with a green CLR branch and a bencode benchmark |
+| R2 | A forced stop lands inside user code that holds a lock or a half-updated structure; on the CLR a user =catch Exception= handler runs during the abort, a loop that never leaves a =catch= / =finally= cannot be stopped, and an undeliverable abort parks the reaper thread in =Cancel= (=TH6=, =TH7=) | medium | same exposure class as JVM =Thread.stop=; documented in the =interrupt= op; =:force-interrupt false= opt-out |
+| R4 | =Thread.Interrupt= consumed by a user =catch= (=TH3=) or lost inside an STM lock wait (=TH8=; the body itself propagates it) | low | the 5 s forced stop is the backstop, exactly as on the JVM |
+| R6 | Windows: PEM private keys unusable by SChannel | certain | PFX round-trip in slice 16; TLS tests already skipped on Windows upstream |
+| R7 | Culture-sensitive string operations on the CLR: ClojureCLR's own =clojure.string= prefix/suffix/search functions and =sort= on strings are culture-sensitive (=B9=) | certain if ported naively | PR 2's helper block with =StringComparison/Ordinal= branches in slice 13; =DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1= documented as a user-side mitigation |
+| R8 | =clj-kondo= cannot lint =:cljr= branches (hard error if the feature is configured, =J5=) | certain | =:cljc {:features [:clj]}=; CLR branch coverage comes from the CLR suite executed with =*warn-on-reflection*= as errors |
+| R9 | ClojureCLR 1.13 changes break assumptions | low in 2026 | pin 1.12.6; CI also runs =1.13.0-alpha= as allowed-failure |
+| R10 | Core load on net8 is 2.5 s (=A10=) and AOT is unavailable on net8 builds (=A5=) | certain | document; AOT through a net9+ =Clojure.Main= build step for deployments (slice 19) |
+| R11 | Test harness is the hidden cost (matcher shim, process spawning, cert generator, 24 test files to gate) | certain | slice 9 budgets 1.5 d with the per-file gating tables in the roadmap |
+| R12 | Rendezvous relaxation changes backpressure | low | =make-rendezvous= on =Monitor= (=C7=) keeps zero-capacity semantics; =rendezvous-backpressure= test pins it |
+| R13 | =StackOverflowException= is uncatchable on .NET: an unbounded recursion kills the process where the JVM survives | certain | document in the CLR section; out of scope to guard |
+| R14 | =ControlledExecution.Run= overhead per exec | low | one delegate plus a =CancellationTokenSource= per exec; measure in slice 11 |
+| R15 | Silent runtime failures on the CLR: missing members compile with only a reflection warning (=B2=, =E9=, =L5=), the 1-arg =Write= resolves to a =Span= overload (=E2=), =RT/classForName "[B"= returns nil (=L5=) | certain without a gate | CLR CI treats reflection warnings in =nrepl.*= as errors and executes every code path (not just =require=) |
+
+* NOGO
+- Inline =#?= as the strategy for =transport=, =completion=, =tls=, =cmdline= (single-expression sites listed in 03-design are the exception, not the rule).
+- =.cljr= override files for shared logic under =src/clojure= (siblings are allowed only for =socket=, =tls=, =cmdline= where nothing is shared).
+- A cooperative-only interrupt (D3).
+- =random-uuid=, =parse-long= or any other Clojure 1.11+ core function in shared code: nREPL supports 1.10.
+- Rewriting nREPL as a C# server.
+- Any game-engine, editor-host or main-thread-dispatch feature in the library.

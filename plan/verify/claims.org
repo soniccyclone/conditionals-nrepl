@@ -1,0 +1,135 @@
+#+TITLE: Claims register: every empirical assertion the plan makes
+#+OPTIONS: ^:nil toc:2
+#+TODO: OPEN | CONFIRMED REFUTED PARTIAL UNTESTABLE
+
+Each claim is something =plan/*.org= asserts about ClojureCLR 1.12.6, .NET 8 or the tooling, and that a decision or a roadmap slice depends on. "Method" says how it is checked: =run= means an experiment in the =nrepl-clr= container (see [[file:README.org][README]]), =source= means a citation at a pinned revision (=clojure-clr= tag =clojure-1.12.6=), =cs= means a C# console program in the same container. "Depends" names the decision (D1..D15), risk (R1..R13) or roadmap slice that changes if the claim is wrong. Verdicts are filled from [[file:results.org][results.org]].
+
+* Batch A. Reader, loader, compiler
+| Id | Claim (plan ref) | Method | Depends | Verdict |
+|---+---+---+---+---|
+| A1 | The reader platform feature is =:cljr=; =:clj= is never injected, so =#?(:clj x)= with no =:cljr= branch yields nothing and =:default= is taken (02 §runtime) | run | every =#?= site | CONFIRMED (unrefuted) |
+| A2 | =#?= is accepted only in =.cljc= files; a =.cljr= or =.clj= file containing =#?= fails to load with "Conditional read not allowed" (02 §runtime, 03 §D) | run | D11, 03 §D | CONFIRMED (unrefuted) |
+| A3 | Load order per namespace is =.cljr= → =.cljc= → =.clj=; a =.cljr= beside a =.cljc= shadows it on CLR (02 §runtime, =RT.cs:3584=) | run + source | D11, D14 | CONFIRMED (unrefuted) |
+| A4 | Load path is =CLOJURE_LOAD_PATH= split on =Path.PathSeparator= (=:= on Linux) plus the current directory, the =Clojure.dll= directory and the entry-assembly directory; a namespace in the CWD loads with no env var (02 §runtime) | run + source =RT.cs= =GetFindFilePathsRaw= | slice 9 | CONFIRMED (upheld) |
+| A5 | AOT from a running image: =(binding [*compile-path* dir] (compile 'ns))= writes =ns.cljc.dll= for a =.cljc= source; on a later =require= the DLL is preferred when newer than the source; a DLL with the source removed still loads (02 §runtime CLJCLR-196, R10) | run | R10 | PARTIAL (upheld) |
+| A6 | =clojure.lang.Compiler/eval= has only a 1-arg overload on CLR (JVM has =eval(Object, boolean)=) (01 §classloaders) | run (reflection on =Compiler= type) | load_file, session | CONFIRMED (unrefuted) |
+| A7 | =Compiler.MethodVar=, =NextLocalNumVar=, =LoopLocalsVar= are =internal= (not reachable as =Compiler/MethodVar= from Clojure); =LocalEnvVar= is =public=; the internal ones are reachable through =GetField= with =BindingFlags.NonPublic|Static= and are =Var= instances that can be bound with =push-thread-bindings= (02 §runtime, 04 §4.6) | run + source =Compiler.cs:206-210= | slice 14 | CONFIRMED (upheld) |
+| A8 | =Compiler/load= on CLR takes 4 arguments (=TextReader=, source path, source name, relative path) and loads a form stream; the JVM 3-arg form does not exist (02 §runtime) | run (reflection) + source | slice 14 | CONFIRMED (upheld) |
+| A9 | =load-reader= / =load-string= / =read-string= with =:read-cond :allow= work on CLR so the =load-file= op can evaluate =.cljc= text sent over the wire (04 §4.6) | run | slice 14 | PARTIAL (upheld) |
+| A10 | Core load on net8 without embedded AOT takes on the order of seconds: measure wall time of =Clojure.Main -e '(println 1)'= (02 §runtime, R10) | run (=time=, 3 runs) | R10 | CONFIRMED (unrefuted) |
+| A11 | The ClojureCLR version string reported by =*clojure-version*= is ={:major 1 :minor 12 :incremental 6}= and =(clojure-version)= returns ="1.12.6"=, so =describe= can reuse =clojure-version= unchanged (04 §4.7) | run | slice 13 | CONFIRMED (unrefuted) |
+
+* Batch B. Types, exceptions, strings, core functions
+| Id | Claim (plan ref) | Method | Depends | Verdict |
+|---+---+---+---+---|
+| B1 | =Throwable= does not resolve on CLR (=(catch Throwable e …)= is a compile error); =Exception= resolves to =System.Exception= without an import (01 §exceptions) | run | =log-exceptions=, =safe-handle=, =caught= | CONFIRMED (unrefuted) |
+| B2 | =ex-message= returns =.Message= and =ex-cause= returns =.InnerException= for any =System.Exception=; =(.getMessage e)= is a compile/runtime error (01 §exceptions, PR 1) | run | PR 1 | CONFIRMED (unrefuted) |
+| B3 | =(byte-array n)= is =System.Byte[]=; =(byte -1)= throws; =(aget ba i)= yields 0–255; =(unchecked-byte 200)= and =(unchecked-byte -56)= results on CLR (01 §bytes) | run | bencode seam, test fixtures | CONFIRMED (unrefuted) |
+| B4 | =format= uses Java-style specifiers on CLR (=%d=, =%s=, =%-10s=, =%05.2f=, =%n=) via =clojure.lang.Printf=, so the library's format strings port unchanged (01 §exceptions) | run | all =format= sites | CONFIRMED (unrefuted) |
+| B5 | =System/getProperty= is a compile error on CLR (=System= is a namespace); =Environment/GetEnvironmentVariable=, =Environment/Version=, =RuntimeInformation/FrameworkDescription=, =Environment/GetFolderPath= work (01 §process) | run | config, version, describe | CONFIRMED (unrefuted) |
+| B6 | =(str (class e))= on CLR yields ="System.ArgumentException"= (no ="class "= prefix) and =(.FullName (class e))= the same; nested type names print as =Outer+Inner= and generics as =List`1= (04 §4.2 D6, D8) | run | D6, D8 | PARTIAL (unrefuted) |
+| B7 | =java.io.Closeable= does not resolve; =IDisposable= resolves to =System.IDisposable=; =with-open= on CLR calls =.Dispose= (check =macroexpand= of =with-open=) and works on a =reify IDisposable= (01 §writers) | run | =FnTransport=, =Server= | CONFIRMED (unrefuted) |
+| B8 | =(random-uuid)= exists on CLR and =(str (Guid/NewGuid))= is the 36-char lowercase hyphenated form identical to a Java UUID string (02 §.NET) | run | session ids on the wire | CONFIRMED (unrefuted) |
+| B9 | =clojure.string= functions on CLR are ordinal (culture-insensitive): =starts-with?=, =ends-with?=, =includes?=, =index-of=, =lower-case=, =upper-case= under =CultureInfo.CurrentCulture = tr-TR= behave the same as under invariant culture, and =(.StartsWith "Å" "Å")= (one-arg, culture-sensitive) differs from =(clojure.string/starts-with? …)= (01 §reflection, R7, PR 2) | run + source =clojure/string.clj= | PR 2, R7 | REFUTED (unrefuted) |
+| B10 | =ns-resolve= of an unknown dotted symbol (=foo.Bar=) returns =nil= on CLR instead of throwing =ClassNotFoundException= (04 §4.6) | run | lookup middleware =#?= | PARTIAL (unrefuted) |
+| B11 | All interned keywords are enumerable on CLR via the private static =Keyword._symKeyMap= (=GetField= NonPublic) whose values are =WeakReference= targets; report the exact field name and type at 1.12.6 (01 §reflection) | run + source =Keyword.cs= | completion seam | CONFIRMED (unrefuted) |
+| B12 | =Environment/NewLine= works; =(System/lineSeparator)= is a compile error (01 §writers) | run | test helpers, out | CONFIRMED (unrefuted) |
+| B13 | =(instance? System.Int64 1)=, =(instance? System.Int32 (int 1))=, =(integer? (int 1))=, =(integer? (byte 1))=, =(integer? 1N)=, =(type 1N)= (=clojure.lang.BigInt=), =(type (bigint "99999999999999999999"))=, =System.Numerics.BigInteger= acceptance by =integer?=; and =extend-protocol= on =System.Int64= dispatches for a boxed long (01 §bytes, 04 §4.4) | run | bencode =BencodeSerializable= | PARTIAL (unrefuted) |
+| B14 | =clojure.edn/read= on CLR requires a =clojure.lang.PushbackTextReader=; passing a plain =StringReader= fails; =(clojure.lang.PushbackTextReader. (StringReader. "{:a 1}"))= reads (01 §bytes) | run | EDN transport | CONFIRMED (unrefuted) |
+| B15 | =clojure.clr.io= exports =text-reader text-writer input-stream output-stream binary-reader binary-writer copy as-file as-dir as-uri= and no =resource= or =file= (02 §runtime) | run (=ns-publics=) | io seam | CONFIRMED (unrefuted) |
+| B16 | =clojure.core.server= loads on CLR and =start-server= accepts a socket connection (02 §runtime) | run | prior art for net seam | CONFIRMED (unrefuted) |
+| B17 | =clojure.test= and =clojure.test.junit= load on CLR; =clojure.test/run-tests= works with =deftest= + =is= (04 §4.9) | run | slice 9 | CONFIRMED (unrefuted) |
+| B18 | =binding= on a =^:dynamic= var is thread-local: a new =Thread= started inside =binding= sees the root value; =bound-fn= conveys; =push-thread-bindings= / =pop-thread-bindings= work on a raw thread (02 §runtime =Var.cs:180=) | run + source | session loop | CONFIRMED (unrefuted) |
+
+* Batch C. Proxy, delegates, deftype, interop idioms
+| Id | Claim (plan ref) | Method | Depends | Verdict |
+|---+---+---+---+---|
+| C1 | =(proxy [System.IO.TextReader] [] (Read [] …) (Read [buf off len] …) (Peek [] …))= compiles and =ReadLine= / =ReadToEnd= on the proxy call the overridden =Read=; report whether the =Read(Span<char>)= overload interferes and whether =Read(char[],int,int)= must return 0 (not -1) at EOF (01 §Java classes, 04 §4.2) | run | D5, stdin reader | PARTIAL (upheld) |
+| C2 | =(proxy [System.IO.TextWriter] [] (Write [^Char c] …))= compiles; the abstract =Encoding= property must be overridden as =get_Encoding= (or the proxy fails to instantiate); =WriteLine= and =Write(String)= route through the overridden =Write(char)= or must each be overridden (01 §Java classes; prior art =cnrepl/print.clj:79=) | run + source =clr.tools.nrepl= | D5, print seam | PARTIAL (upheld) |
+| C3 | Throughput of a proxy =TextWriter= vs =StringWriter= for 1e6 =Write(char)= calls and 1e5 =Write(String)= calls (ms); if feasible also a C# =TextWriter= subclass built with =dotnet build= and loaded with =assembly-load-from= (03 §E) | run + cs | D5 | CONFIRMED (upheld) |
+| C4 | =(Thread. (gen-delegate System.Threading.ThreadStart [] (f)))= starts a thread; =(set! (.IsBackground t) true)=, =(set! (.Name t) "x")= work; a Clojure fn is not implicitly a delegate (=(Thread. f)= fails) (01 §threads) | run | threading seam | PARTIAL (overturned) |
+| C5 | =(Thread. (gen-delegate ThreadStart [] …) (int max-stack))= resolves the =maxStackSize= overload (04 §4.1 stack size) | run | =:thread-opts= | CONFIRMED (unrefuted) |
+| C6 | =deftype= with =^:unsynchronized-mutable= fields and a =set!= in a method works on CLR (pushback stream) (04 §4.4) | run | io seam | CONFIRMED (unrefuted) |
+| C7 | =(locking o (Monitor/Wait o ms))= and =(Monitor/Pulse o)= work from Clojure; =Monitor.Wait= returns =false= on timeout (rendezvous implementation) (04 §4.4) | run | D2, rendezvous | CONFIRMED (upheld) |
+| C8 | =|System.Collections.Concurrent.BlockingCollection`1[System.Object]|= constructs with capacity 1; =.Add=/=.Take= work; =(.TryTake bc (by-ref x) 100)= returns =false= on timeout and binds =x= on success; passing =Int64/MaxValue= as the millisecond argument fails (overflow or =ArgumentOutOfRange=) and =Timeout/Infinite= (-1) works (01 §threads, 04 §4.4) | run | queues, timeouts | PARTIAL (unrefuted) |
+| C9 | =Task/Run= needs a delegate: =(Task/Run (sys-func [Object] [] …))= or =(gen-delegate Action [] …)= works and the body runs on a =ThreadPool= thread (=IsThreadPoolThread= true) (04 §4.1) | run | D2 | CONFIRMED (unrefuted) |
+| C10 | =(reify System.IDisposable (Dispose [_] …))= and =definterface= work (04 §4.4) | run | Closeable replacement | CONFIRMED (unrefuted) |
+| C11 | =(Environment/Exit 0)= terminates; =AppDomain.CurrentDomain.ProcessExit= event can be subscribed with =(.add_ProcessExit AppDomain/CurrentDomain (gen-delegate EventHandler [s e] …))=; =Console.CancelKeyPress= likewise (04 §4.7) | run | process seam | CONFIRMED (unrefuted) |
+
+* Batch D. Threads and interrupt semantics (D3 evidence)
+Every experiment here must be bounded with =--timeout= and run the candidate work on a secondary thread so the harness can report a hang instead of becoming one.
+| Id | Claim (plan ref) | Method | Depends | Verdict |
+|---+---+---+---+---|
+| TH1 | =Thread.Interrupt= on a thread blocked in =Thread.Sleep=, =Monitor.Wait=, =BlockingCollection.Take= and =Monitor.Enter= (contended lock) wakes it with =ThreadInterruptedException= (02 §.NET, 04 §4.1) | run | interrupt of idle session | CONFIRMED (unrefuted) |
+| TH2 | =Thread.Interrupt= on a thread spinning in =(loop [] (recur))= does nothing while it spins; the interrupt is latched and fires as =ThreadInterruptedException= at the thread's next blocking call (=Thread.Sleep(0)= does or does not count: report); there is no pollable "interrupted" flag (02 §.NET) | run | D3 cooperative design | CONFIRMED (unrefuted) |
+| TH3 | Catching =ThreadInterruptedException= consumes the interrupt: after the catch, a subsequent =Thread.Sleep(10)= completes normally (02 §.NET) | run | D3, R4 | CONFIRMED (unrefuted) |
+| TH4 | =Thread.Interrupt= does not unblock a thread inside a synchronous =Socket.Receive= / =NetworkStream.Read= on a loopback TCP connection; =Socket.Dispose= (or =Close=) from another thread does, and the blocked call throws (report the exception type: =SocketException= with =OperationAborted=, =ObjectDisposedException=, or =IOException= wrapping one) (02 §.NET) | run | transport reader shutdown | CONFIRMED (unrefuted) |
+| TH5 | =Thread.Abort= throws =PlatformNotSupportedException= on .NET 8 (02 §.NET) | run | R2, D3 | CONFIRMED (unrefuted) |
+| TH6 | =System.Runtime.ControlledExecution/Run= exists on .NET 8 (=Action=, =CancellationToken=); it aborts a Clojure =(loop [] (recur))= body when the token is cancelled, the thread's =finally= blocks run, the exception surfaced is =ThreadInterruptedException=, and the runtime keeps working afterwards (another eval on a fresh thread succeeds); note any required =AppContext= switch or obsolete diagnostic (02 §.NET, 04 §4.1 D3(b)) | run | D3(b) | PARTIAL (unrefuted) |
+| TH7 | =ControlledExecution.Run= cannot abort a body blocked in =Monitor.Wait= or in a native call, or inside a =finally= (02 §.NET) | run | D3(b) limits | PARTIAL (unrefuted) |
+| TH8 | STM: an interrupt delivered while a thread is inside =dosync= (e.g. sleeping in the body) is swallowed as a retry rather than propagated (02 §runtime, R4) | run + source =LockingTransaction.cs= | R4 | PARTIAL (unrefuted) |
+| TH9 | =future= on CLR runs on a dedicated =System.Threading.Thread= with =IsBackground= false; =future-cancel= of a CPU-bound future interrupts then joins, so the caller of =future-cancel= blocks while the body spins (02 §runtime =Future.cs=) | run (bounded!) + source | threading seam, R2 | CONFIRMED (unrefuted) |
+| TH10 | =send= actions run on the =ThreadPool= (=IsThreadPoolThread= true); =send-off= creates a new =Thread= per action (02 §runtime =Agent.cs=) | run + source | threading seam | CONFIRMED (unrefuted) |
+| TH11 | =System.Threading.Timer= callbacks run on pool threads and may overlap when the callback outlives the period (02 §.NET) | run | reaper | CONFIRMED (unrefuted) |
+| TH12 | =Thread.CurrentThread.ThreadState= is a flags enum; =IsAlive= is the portable liveness check; thread =Name= can be set once only (second set throws =InvalidOperationException=) (01 §threads) | run | thread naming by prefix | PARTIAL (unrefuted) |
+| TH13 | A =Thread= created with =gen-delegate= and a =try/catch= wrapper reports uncaught exceptions: an uncaught exception on a background thread terminates the whole process (no JVM-style per-thread handler); =AppDomain.UnhandledException= can observe it (04 §4.1 D2 "try/catch wrapper") | run | D2 | CONFIRMED (unrefuted) |
+
+* Batch E. Streams, IO, console
+| Id | Claim (plan ref) | Method | Depends | Verdict |
+|---+---+---+---+---|
+| E1 | =Stream.Read(byte[],int,int)= returns 0 at EOF (never -1); =ReadByte= returns -1 at EOF; with a =^|System.Byte[]|= hint =(.Read s buf 0 n)= resolves to the array overload without reflection warnings (=*warn-on-reflection*= true) (01 §bytes) | run | bencode seam | CONFIRMED (upheld) |
+| E2 | =(.Write s buf 0 n)= and =(.WriteByte s (byte 5))= work on =MemoryStream= and =NetworkStream=; the =ReadOnlySpan= overload is not picked when the hint is =^|System.Byte[]|= (01 §bytes) | run | bencode seam | PARTIAL (upheld) |
+| E3 | =(.GetBytes System.Text.Encoding/UTF8 "é")= and =(.GetString System.Text.Encoding/UTF8 bytes)= round-trip; =(String. bytes "UTF-8")= does not exist (01 §bytes) | run | utf8 helpers | CONFIRMED (upheld) |
+| E4 | =clojure.lang.PushbackInputStream= exists at 1.12.6 with 1-byte pushback; its =Read(buf,0,0)= (zero-length) on a =NetworkStream= blocks until data arrives, whereas =MemoryStream= returns 0 immediately (02 §runtime, 04 §4.4) | run + source =Readers/PushbackInputStream.cs= | pushback choice | PARTIAL (upheld) |
+| E5 | =clojure.lang.PushbackTextReader= (1 char) and =LineNumberingTextReader= exist; =LineNumberingTextReader.Peek= forwards to the wrapped reader (verify with a proxy reader that logs calls) (02 §runtime, 04 §4.2 =skip-stdin-newline=) | run | stdin reader | PARTIAL (upheld) |
+| E6 | =LineNumberingTextReader= has a private =_columnNumber= field settable through =GetField= NonPublic, and a public =LineNumber= / =ColumnNumber= property; report exact names at 1.12.6 (04 §4.2 =set-column!=, prior art =cnrepl/interruptible_eval.clj:31=) | run + source | interruptible_eval | CONFIRMED (upheld) |
+| E7 | ClojureCLR's root =*out*= is a writer over =Console.OpenStandardOutput()=, so =Console.SetOut= does not capture =(println …)= with root bindings, but does capture =Console.Out.WriteLine=; =(alter-var-root #'*out* …)= is needed to tee ClojureCLR output (02 §runtime, 04 §4.3) | run + source =RT.cs= init | =forward-system-output= | CONFIRMED (upheld) |
+| E8 | =Console.SetOut= wraps the writer with =TextWriter.Synchronized= and is process-wide (02 §.NET) | run | tee | CONFIRMED (upheld) |
+| E9 | =TextReader.Read(char[],int,int)= on =Console.In= returns 0 at EOF; =TextReader.Peek= returns -1 when no data; there is no =ready()= (01 §Java classes) | run | stdin reader | PARTIAL (upheld) |
+| E10 | A =TextWriter= proxy's =Dispose(bool)= or =Close= is invoked by =with-open= and can flush synchronously before the enclosing =catch= runs (04 §4.3 close ordering) | run | print quota | PARTIAL (overturned) |
+
+* Batch F. Networking and TLS
+| Id | Claim (plan ref) | Method | Depends | Verdict |
+|---+---+---+---+---|
+| F1 | =TcpListener= on =IPAddress.Loopback= port 0, =.Start=, =.LocalEndpoint= gives the bound port; =AcceptSocket= blocks; a client =Socket= connects; =NetworkStream= round-trips bytes (04 §4.5) | run | net seam | CONFIRMED (unrefuted) |
+| F2 | =TcpListener.Stop= while another thread is blocked in =AcceptSocket= makes that call throw; report the exception type (=SocketException= / =ObjectDisposedException=) and =SocketErrorCode= (02 §.NET) | run | accept-loop exit | CONFIRMED (unrefuted) |
+| F3 | =IPAddress/Parse "localhost"= throws =FormatException=; =Dns/GetHostAddresses "localhost"= returns loopback addresses (01 §sockets) | run | =--bind= handling | CONFIRMED (unrefuted) |
+| F4 | =UnixDomainSocketEndPoint= with =AddressFamily.Unix= listens and accepts on Linux; the socket file remains after =Dispose= unless deleted explicitly (report which) (02 §.NET, 04 §4.5) | run | unix sockets | PARTIAL (unrefuted) |
+| F5 | After =TcpListener.Start= on Linux, =GetSocketOption(Socket, ReuseAddress)= is already non-zero (the PAL sets it), so nREPL must not set it again (02 §.NET refuter 12) | run | net seam | PARTIAL (unrefuted) |
+| F6 | =Socket.Connected= turns false only after a failed send/receive; reading from a =NetworkStream= whose peer closed returns 0, and a peer reset surfaces as =IOException= wrapping =SocketException= (01 §sockets) | run | disconnection handling | CONFIRMED (unrefuted) |
+| F7 | =SslStream= over a loopback =NetworkStream= completes a TLS 1.3 handshake with a self-signed =X509Certificate2= built from PEM via =X509Certificate2.CreateFromPem= on Linux .NET 8; =SslProtocols.None= negotiates 1.3 (02 §.NET) | cs or run | D7, phase 4 | CONFIRMED (unrefuted) |
+| F8 | =System.Uri= cannot represent =nrepl+unix:/path= opaquely the way =java.net.URI= 3-arg does (it normalizes or rejects); report the actual =ToString= (01 §sockets) | run | cmdline URI line | PARTIAL (unrefuted) |
+
+* Batch H. ClojureCLR source citations re-pinned at =clojure-1.12.6=
+The plan cites =file:line= at commit =97f1a54= (2026-10-09 HEAD, 1.13.0-SNAPSHOT). Re-cite every ClojureCLR source fact in =02-target-facts.org= and =07-prior-art.org= at tag =clojure-1.12.6= (commit =8284d3bc=) and report the lines that moved.
+| Id | Claim | Method | Verdict |
+|---+---+---+---|
+| H1 | =LispReader.cs= platform key =cljr= | source | CONFIRMED (upheld) |
+| H2 | =RT.cs= source extension order and DLL preference | source | CONFIRMED (upheld) |
+| H3 | =Compiler.cs= internal vars | source | CONFIRMED (unrefuted) |
+| H4 | =Var.cs= =[ThreadStatic]= | source | CONFIRMED (upheld) |
+| H5 | No =IsBackground= anywhere in =Clojure/Clojure= | source | PARTIAL (upheld) |
+| H6 | =Future.cs= dedicated thread, cancel = Interrupt + Join; =Agent.cs= =QueueUserWorkItem=; =LockingTransaction.cs= interrupt handling; =Compiler.cs= =EvalContext= / =GenContext.cs= =AssemblyBuilderAccess.Run=; =Readers/= classes; =clr/io.clj= public API lines; =core.clj= =format= via =Printf=; =core_proxy.clj= / =core_deftype.clj= / =genclass.clj= presence; =Clojure.csproj= TFMs and embedded-AOT TFMs; =Clojure.Main.csproj= TFMs; =changes.md= CLJCLR-194/195/196 | source | PARTIAL (upheld) |
+
+* Batch J. Tooling: =cljr=, deps, test runner (slice 9 evidence)
+| Id | Claim (plan ref) | Method | Depends | Verdict |
+|---+---+---+---+---|
+| J1 | =cljr= 0.1.0-beta1 reads a =deps.edn= (=:paths=, =:deps= with =:git/url= + =:git/sha=), resolves git deps, and runs =-M -m ns= and =-X= with the resolved paths in =CLOJURE_LOAD_PATH=; report the exact commands, where it caches, and whether a separate =deps-clr.edn= file name is supported or must be selected another way (02 §runtime, 04 §4.9) | run | slice 9 | CONFIRMED (upheld) |
+| J2 | =io.github.dmiller/test-runner= tag =v0.5.3clr= resolves as a git dep and =cljr -X:test= runs =clojure.test= namespaces from a =:test= alias (04 §4.9) | run | slice 9 | DISPUTED (disputed) |
+| J3 | =clr.test.check= (git dep, tag =v1.1.4=) loads and a =defspec= runs (02 §runtime) | run | slice 9 | CONFIRMED (unrefuted) |
+| J4 | =clojure.test.junit= is in core and writes XML (04 §4.9) | run | CI | CONFIRMED (upheld) |
+| J5 | =clj-kondo= has no =:cljr= language key: with ={:cljc {:features [:clj :cljr]}}= it still lints =:cljr= branches (report what it does with =System.*= symbols) — run in the =nrepl-jvm= image with the repo's kondo alias on a sample =.cljc= (04 §4.9, R8) | run (jvm) | R8 | REFUTED (upheld) |
+| J6 | =cljfmt= 0.15.6 default =:file-pattern= excludes =.cljr= and includes =.cljc= (04 §4.9) | source / run (jvm) | lint | CONFIRMED (upheld) |
+
+* Batch L. Distance to port: load today's namespaces on ClojureCLR
+Copy =src/clojure/nrepl/<ns>.clj= to a scratch load path as =.cljc= (plus any namespace it requires, already-ported stubs allowed) and =require= it on ClojureCLR. Record the first failure, apply the smallest change that gets past it, repeat up to 20 times, and report the ordered list of distinct failures with the plan's remedy for each. The point is to check the audit's per-file site counts and seam boundaries against reality, not to port the file.
+| Id | Namespace | Audit verdict (01) | Verdict |
+|---+---+---+---|
+| L1 | =nrepl.bencode= (402 LOC, 41 sites) | host namespace split | PARTIAL (upheld) |
+| L2 | =nrepl.misc= (170, 21) | host namespace split | DISPUTED (disputed) |
+| L3 | =nrepl.version= + =nrepl.config= (46+85) | few sites / split | PARTIAL (upheld) |
+| L4 | =nrepl.middleware= + =nrepl.spec= (185+224) | few sites / pure | CONFIRMED (upheld) |
+| L5 | =nrepl.transport= (283, 54; needs bencode, misc) | host namespace split | PARTIAL (unrefuted) |
+| L6 | =nrepl.util.threading= + =nrepl.util.print= + =nrepl.middleware.caught= | split / pure / pure | PARTIAL (upheld) |
+| L7 | =nrepl.util.completion= (682, 78) | host namespace split | PARTIAL (upheld) |
+| L8 | =nrepl.util.lookup= + =nrepl.middleware.lookup= + =nrepl.middleware.completion= | few / pure / pure | PARTIAL (upheld) |

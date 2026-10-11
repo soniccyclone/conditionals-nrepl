@@ -1,0 +1,172 @@
+#+TITLE: 1. Findings: where nREPL 1.8 touches the JVM
+#+OPTIONS: ^:nil toc:2 num:nil
+#+DATE: 2026-10-11
+
+What the code does today, from reading every file under =src/=, =test/=, =build/= and =libnrepl/= at =d00d171= (post-1.8.0). Counts are interop sites (imports plus body forms) that need a decision on ClojureCLR. The "distance to port" experiments (L1–L8 in [[file:verify/claims.org][verify/claims.org]]) loaded eight namespaces on ClojureCLR as they are; their corrections are applied in the table and listed in the last section.
+
+* Totals
+| Verdict | Files | Meaning |
+|---+---+---|
+| pure | 13 | rename to =.cljc=, no edit |
+| few =#?= sites | 14 | ≤ ~12 inline conditionals, or one macro-level conditional |
+| host namespace split | 19 | code moves behind a seam ([[file:03-design.org][03-design]]) |
+| Java class → replacement | 9 | =src/java/nrepl/**= needs a =proxy= on the CLR |
+| JVM-only | 12 | JVMTI, junixsocket, Clojars build, kaocha config, CircleCI |
+The first audit's total of 1 089 sites is a lower bound: counting by compile error misses members that resolve reflectively (=transport= has ~78 sites by form, =completion= 166), while =Var= field access, =(str var)= and =catch Exception= were over-counted.
+
+* Per-file verdict
+| File | LOC | Verdict | Sites |
+|---+---+---+---|
+| ~src/clojure/nrepl/ack.clj~ | 64 | few #? sites | 8 |
+| ~src/clojure/nrepl/bencode.clj~ | 402 | host namespace split (primitives stay inline) | 41 (39–47 by form, =L1=) |
+| ~src/clojure/nrepl/cmdline.clj~ | 705 | JVM-only after extracting =nrepl.cmdline.options= (D17) | 61 |
+| ~src/clojure/nrepl/config.clj~ | 85 | host namespace split | 16 (=L3=) |
+| ~src/clojure/nrepl/core.clj~ | 251 | few #? sites | 17 |
+| ~src/clojure/nrepl/middleware.clj~ | 185 | few #? sites | 2 + the =safe-handle= expansion (=L4=) |
+| ~src/clojure/nrepl/middleware/caught.clj~ | 105 | pure | 0 (=L6=; =Throwable= only in docstrings) |
+| ~src/clojure/nrepl/middleware/completion.clj~ | 69 | pure | 0 (=L8=) |
+| ~src/clojure/nrepl/middleware/interruptible_eval.clj~ | 226 | host namespace split | 26 |
+| ~src/clojure/nrepl/middleware/io.clj~ | 39 | pure | 3 |
+| ~src/clojure/nrepl/middleware/load_file.clj~ | 97 | few #? sites | 12 |
+| ~src/clojure/nrepl/middleware/lookup.clj~ | 62 | pure | 0 (=L8=) |
+| ~src/clojure/nrepl/middleware/print.clj~ | 205 | Java class → replacement | 25 |
+| ~src/clojure/nrepl/middleware/session.clj~ | 406 | host namespace split | 29 |
+| ~src/clojure/nrepl/misc.clj~ | 170 | few #? sites | 8 inline (=L2=) |
+| ~src/clojure/nrepl/server.clj~ | 239 | few #? sites after PR 3/6 | 27 |
+| ~src/clojure/nrepl/socket.clj~ | 209 | JVM file; CLR sibling =.cljr= | 46 |
+| ~src/clojure/nrepl/socket/jdk17.clj~ | 26 | JVM-only | 8 |
+| ~src/clojure/nrepl/socket/junixsocket.clj~ | 28 | JVM-only | 9 |
+| ~src/clojure/nrepl/spec.clj~ | 224 | pure | 0 (=L4=) |
+| ~src/clojure/nrepl/tls.clj~ | 369 | JVM file; CLR sibling =.cljr= | 60 |
+| ~src/clojure/nrepl/tls_client_proxy.clj~ | 260 | JVM-only until phase 3 | 50 |
+| ~src/clojure/nrepl/transport.clj~ | 283 | host namespace split | ~78 by form, 23 kinds, 5 runtime-only (=L5=) |
+| ~src/clojure/nrepl/util/classloader.clj~ | 27 | JVM-only | 7 |
+| ~src/clojure/nrepl/util/completion.clj~ | 682 | host namespace split (generated compliment-lite copy, D16) | 166 host forms, ~78 edits on live paths (=L7=) |
+| ~src/clojure/nrepl/util/jvmti.clj~ | 53 | JVM-only | 16 |
+| ~src/clojure/nrepl/util/lookup.clj~ | 39 | pure | 0 (=L8=) |
+| ~src/clojure/nrepl/util/out.clj~ | 100 | host namespace split | 12 |
+| ~src/clojure/nrepl/util/print.clj~ | 47 | pure | 0 (=L6=) |
+| ~src/clojure/nrepl/util/threading.clj~ | 91 | host namespace split | 30–34 (=L6=) |
+| ~src/clojure/nrepl/version.clj~ | 46 | few #? sites | 8 (=L3=) |
+| ~src/java/nrepl/DaemonThreadFactory.java~ | 28 | Java class → replacement | 7 |
+| ~src/java/nrepl/JvmtiAgent.java~ | 24 | JVM-only | 3 |
+| ~src/java/nrepl/SessionThread.java~ | 23 | Java class → replacement | 7 |
+| ~src/java/nrepl/in/QueuePollingReader.java~ | 115 | Java class → replacement | 14 |
+| ~src/java/nrepl/main.java~ | 15 | not needed (=Clojure.Main -m=) | 3 |
+| ~src/java/nrepl/out/CallbackBufferedOutputStream.java~ | 123 | Java class → replacement | 21 |
+| ~src/java/nrepl/out/QuotaBoundWriter.java~ | 54 | Java class → replacement | 8 |
+| ~src/java/nrepl/out/QuotaExceeded.java~ | 5 | Java class → replacement | 1 |
+| ~src/java/nrepl/out/TeeOutputStream.java~ | 51 | Java class → replacement | 6 |
+| ~test/clojure/nrepl/bencode_test.clj~ | 249 | few #? sites | 16 |
+| ~test/clojure/nrepl/cmdline_test.clj~ | 494 | host namespace split | 48 |
+| ~test/clojure/nrepl/cmdline_tty_test.clj~ | 60 | JVM-only | 4 |
+| ~test/clojure/nrepl/core_test.clj~ | 1068 | host namespace split (must load first on the CLR: seven test files require it) | 58 |
+| ~test/clojure/nrepl/describe_test.clj~ | 52 | few #? sites (=:java= hard-coded at 22-25) | 2 |
+| ~test/clojure/nrepl/edn_test.clj~ | 47 | few #? sites | 9 |
+| ~test/clojure/nrepl/middleware/completion_test.clj~ | 31 | pure (unused =java.io.File= import) | 1 |
+| ~test/clojure/nrepl/middleware/interruptible_eval_test.clj~ | 23 | JVM-only until claim X12 | 4 |
+| ~test/clojure/nrepl/middleware/load_file_test.clj~ | 102 | few #? sites | 9 |
+| ~test/clojure/nrepl/middleware/lookup_test.clj~ | 30 | pure (unused import) | 1 |
+| ~test/clojure/nrepl/middleware/print_test.clj~ | 246 | few #? sites | 11 |
+| ~test/clojure/nrepl/middleware/session_test.clj~ | 28 | pure | 0 |
+| ~test/clojure/nrepl/middleware_test.clj~ | 80 | pure | 0 |
+| ~test/clojure/nrepl/misc_test.clj~ | 20 | few #? sites (l.15 =io/file=, l.18 =System.Uri= trailing slash) | 2 |
+| ~test/clojure/nrepl/response_test.clj~ | 50 | few #? sites (=CountDownLatch=, =identityHashCode=, 8000 futures) | 4 |
+| ~test/clojure/nrepl/sanity_test.clj~ | 31 | few #? sites (=TextWriter.Write(int)= prints digits) | 5 |
+| ~test/clojure/nrepl/test_helpers.clj~ | 101 | host namespace split | 21 |
+| ~test/clojure/nrepl/tls_test.clj~ | 306 | few #? sites | 28 |
+| ~test/clojure/nrepl/transport_test.clj~ | 31 | few #? sites | 8 |
+| ~test/clojure/nrepl/util/classloader_test.clj~ | 23 | JVM-only | 5 |
+| ~test/clojure/nrepl/util/completion_test.clj~ | 134 | host namespace split (~20 of 33 assertions encode JVM names) | 15 |
+| ~test/clojure/nrepl/util/jvmti_test.clj~ | 15 | JVM-only | 5 |
+| ~test/clojure/nrepl/util/lookup_test.clj~ | 72 | few #? sites | 8 |
+| ~test/clojure/nrepl/util/out_test.clj~ | 111 | host namespace split | 14 |
+| ~tests.edn~, ~.circleci/config.yml~, ~Makefile~, ~build/main.clj~, ~deps.edn~, ~eastwood.clj~, ~libnrepl/src/nrepl_agent.c~ | 683 | JVM-only | 54 |
+| ~build/docs.clj~ | 116 | few #? sites | 8 |
+| ~.clj-kondo/config.edn~, ~.cljfmt.edn~, ~.github/workflows/*.yml~ | 91 | config (phase 0 edits) | 4 |
+
+* Java helper classes
+| Class | Role | CLR reality | Replacement |
+|---+---+---+---|
+| =DaemonThreadFactory= (~src/java/nrepl/DaemonThreadFactory.java~) | daemon threads, =%d= names, context classloader | =Thread= is sealed; no classloader | =make-executor= in the threading seam |
+| =SessionThread= (~src/java/nrepl/SessionThread.java~) | =Thread= subclass trimming the eval stack | cannot subclass =Thread= | =session-thread=: composition, optional =maxStackSize= |
+| =JvmtiAgent= + ~libnrepl/src/nrepl_agent.c~ + ~res/*.so~ | forced =Thread.stop= on JDK 20+ | .NET has =ControlledExecution.Run= instead | =run-interruptible= / =interrupt-stop= (D3) |
+| =QueuePollingReader= (~src/java/nrepl/in/QueuePollingReader.java~) | =*in*= fed by the =stdin= op; sends =need-input= | =TextReader= proxy: =Read()= -1 at EOF, bulk =Read= 0 at EOF, non-blocking =Peek= from the queue | =stdin-reader= proxy (exact shape in 03-design) |
+| =CallbackBufferedOutputStream= (~src/java/nrepl/out/CallbackBufferedOutputStream.java~) | byte-level line buffer feeding =:out= | CLR =*out*= is a char-based =TextWriter= | =replying-writer= proxy (UTF-16 units, surrogate-safe) |
+| =QuotaBoundWriter= + =QuotaExceeded= | throws an =Error= so user =catch Exception= cannot swallow | single-rooted =System.Exception= | =print-with-quota= (kind + flag) |
+| =TeeOutputStream= | =forward-system-output= tee of =System.out/err= | =Console.SetOut/SetError= plus root =*out*= rebinding | =tee-writer= + =install-system-writers!= |
+| =main= | =java -cp … nrepl.main= | no classpath | =Clojure.Main -m nrepl.cmdline= |
+
+* Cross-cutting concerns
+** Bytes and streams
+- Java =byte[]= is signed, CLR =byte-array= is =System.Byte[]= (0–255). ~src/clojure/nrepl/bencode.clj:97~'s =unchecked-byte= narrowing is the identity on the CLR (=B3=). Fixture literals at ~test/clojure/nrepl/bencode_test.clj:186-192~ are negative and wrap silently to 255 in a seq literal: they need =(bit-and x 0xFF)=.
+- EOF: =InputStream.read(byte[],off,len)= returns -1, =Stream.Read= returns 0; the loop test is =(and (zero? n) (pos? len))= because an empty netstring =0:= is a legal zero-length read (=L1=).
+- =clojure.lang.PushbackInputStream= exists on the CLR and is used over a =BufferedStream= (=E4=); =PushbackTextReader= / =LineNumberingTextReader= on the text side.
+- The 1-arg =(.Write s buf)= compiles against =ReadOnlySpan= and throws at runtime (=E2=): every write is 3-arg or =WriteByte=; 9 sites in =bencode.clj=.
+- UTF-8: 10 sites, 2 helper fns; =(String. bytes "UTF-8")= compiles and throws at runtime (=E3=).
+- =extend-protocol BencodeSerializable java.lang.Number= (~bencode.clj:366~): the CLR cannot =extend-protocol= on =Int32= / =Byte= (=B13=) → an =integer?= branch in the =Object= fallback under =#?(:cljr …)=.
+- =clojure.clr.io=: =text-reader= / =text-writer= (also over =Socket= and =Stream=); no =file=, =reader=, =writer=, =resource= (=B15=, =L3=); =edn/read= needs a =PushbackTextReader=.
+- =(RT/classForName "[B")= returns nil silently on the CLR; the =<bytes= dispatch needs =|System.Byte[]|= (=L5=).
+** Java static helper classes and missing imports (missed by the first audit)
+- Only =System.*= is auto-imported on ClojureCLR. =Integer/parseInt= (×4: =misc= ×2, =version=, =cmdline=), =Long/MAX_VALUE= (×3: =transport=, =core=, =cmdline=), =Character/isUpperCase= (×2: =completion=), =Byte/TYPE= + =Byte/toUnsignedInt= (=bencode=), =Class/forName= (=cmdline=), =Arrays/sort= (=bencode=), =Semaphore= (=transport= tty), =Iterable= (=interruptible_eval=, =completion=) are compile errors; =Thread/currentThread= (×14) and =Thread/sleep= (×30, mostly tests) need =(:import [System.Threading Thread])= or the seam. =Math/…=, =String/valueOf= compile and fail at runtime (=L2=, =L3=).
+- =try= / =catch Exception= around JVM-only interop gives no protection: the unresolved symbol fails the whole top-level form at compile time (=L2=).
+- Member names do not alias: =.exists= → =.Exists=, =.getParentFile= → =.Directory=; lookup is case-sensitive; a =def= evaluated at load turns such a runtime miss into a load failure (=config.clj=, =L3=).
+** Exceptions and names
+- =Throwable= does not resolve: 15 sites in shared files (~misc.clj:17,28~, ~transport.clj:65,73,115~, ~server.clj:28,69~, ~ack.clj:49~, ~interruptible_eval.clj:134,159,161,169~) plus JVM-only files.
+- =.getMessage= → =ex-message= (24 hits, PR 1). =safe-handle= (~src/clojure/nrepl/transport.clj:261-283~) currently throws =MissingMethodException= on the CLR error path and the client receives nothing (=L8=).
+- =java.net.SocketException(String)= cannot be constructed on .NET; the disconnection exception goes through =nrepl.socket= (PR 3).
+- Map: =EOFException→EndOfStreamException=, =IllegalArgumentException→ArgumentException=, =IllegalStateException→InvalidOperationException=, =InterruptedException→ThreadInterruptedException=, =ClosedChannelException→SocketException(Interrupted)=, =URISyntaxException→UriFormatException=, =ThreadDeath→ThreadAbortException / OperationCanceledException= (=TH6=), =Compiler$CompilerException→Compiler+CompilerException=.
+- Wire-visible =:ex= / =:root-ex=: =(str (class e))= is ="class java.lang.X"= on the JVM and ="System.X"= on the CLR with the same expression (=B6=, D6). Tests at ~test/clojure/nrepl/core_test.clj:496-497,844-938~ match on these; =(/ 1 0)= throws =System.ArithmeticException= (=B1=).
+- Uncatchable on .NET: =StackOverflowException=, =AccessViolationException= (R13).
+- =format= uses Java-style specifiers on ClojureCLR (=B4=); =(str true)= is ="True"= and =(str 1.0)= is ="1"= (=L8=): =sanitize-meta= coerces booleans explicitly (PR 1).
+- Unmatched optional regex groups are ="" = on the CLR, =nil= on the JVM (=L7=); =var-symbol?= and =split-by-leading-literals= in =completion= need =not-empty=.
+** Threads, interrupt, executors
+- =Thread.interrupt= on the JVM is a sticky, pollable flag; =Thread.Interrupt= on .NET has no pollable flag, is latched until the next wait (=TH2=, =TH3=), wakes every =WaitSleepJoin= wait within ~1 ms (=TH1=) and never unblocks a socket read (=TH4=). Sites: ~src/clojure/nrepl/util/threading.clj:86~, ~transport.clj:59,62,67~, ~middleware/session.clj:223~, ~test/clojure/nrepl/core_test.clj:507~.
+- Forced stop: =Thread.Abort= is gone (=TH5=); =ControlledExecution.Run= wraps the body and aborts it 16–18 ms after =Cancel= (=TH6=), with the limits in =TH7=. ~util/threading.clj:62-91~, ~util/jvmti.clj~, =JvmtiAgent=, ~core_test.clj:452-546~ map onto it (D3).
+- Executors: =listen=, =transport=, =handle=, =thread-reaper=, =ephemeral= are cached pools from =DaemonThreadFactory=. The infinite loops (accept ~server.clj:234~, per-connection handle ~server.clj:80~, reader ~transport.clj:58~) and the ephemeral user evals get dedicated threads on the CLR (D1, D2); the reaper is a dedicated thread, not a =Timer= (=TH11=).
+- =run-with= does not convey bindings (~src/clojure/nrepl/cmdline.clj:153~); the session pushes bindings explicitly; ClojureCLR var frames are =[ThreadStatic]= (=B18=).
+- =SynchronousQueue= has no .NET equivalent; a =Monitor=-based one-slot handoff keeps the semantics (=C7=, R12).
+- =BlockingQueue.poll(long, TimeUnit)= → =TryTake(out T, int)= with the =by-ref= and Int32 rules of =C8=; =Long/MAX_VALUE= (~core.clj:17~, ~transport.clj:47~) → =infinite-ms=.
+- Clojure fns are not delegates: =(Thread. f)=, =(reify Runnable)=, =.submit= need =gen-delegate= (=C4=); =^Runnable= / =.run= in ~session.clj:153-160,206-208~ stay under =#?(:clj …)=.
+- =Thread$State/TERMINATED= → =.IsAlive= (=TH12=); daemon → =IsBackground=true=; an uncaught exception on any thread kills the process (=TH13=).
+** Classloaders
+- =DynamicClassLoader=, context classloader, =Compiler/LOADER= (~src/clojure/nrepl/misc.clj:92-98~, ~middleware/session.clj:128-131,212~, ~util/classloader.clj~, =DaemonThreadFactory=, =SessionThread=, 4 tests in ~core_test.clj:946-1026~) have no CLR analog; all =:clj=-only; the =nrepl.util.classloader= require leaves =session.clj= and =util/threading.clj=.
+- =Compiler/eval= is 1-arg on the CLR (=A6=); ~load_file.clj:26-29~ binds three =internal= vars reachable by reflection (=A7=); =SOURCE= / =SOURCE_PATH= are =*source-path*= / =*file*=.
+** Sockets, TLS, URIs
+- The JVM encodes TLS and Unix-ness in socket subtypes (~src/clojure/nrepl/socket.clj:100,106,119-132~); .NET has one =Socket= class and layers =SslStream=. The CLR sibling =nrepl/socket.cljr= implements the contract table in 03-design.
+- The =java.nio= channel/stream split and the JDK-4509080 workaround (~socket.clj:145-189~) are JVM-only; the =Writable= protocol stays because the NIO path is not an =OutputStream=.
+- Semantics: =ServerSocket.bind= implies listen, .NET needs =Listen=; =isConnected= is sticky-true, =Socket.Connected= flips after a failed I/O (=F6=); =--bind localhost= resolves to =::1= first on .NET (=F3=, =B16=); =NetworkStream= failures arrive as =IOException= wrapping =SocketException= (~server.clj:87~ and four test assertions); never set =ReuseAddress= (=F5=).
+- TLS: JSSE → =SslStream= with =CreateFromPem= over =AsSpan=, =CopyWithPrivateKey=, =CustomRootTrust= (=F7=); PEM scanning (~src/clojure/nrepl/tls.clj:84-149~) is pure. TLS tests already skipped on Windows.
+- =java.net.URI= (~src/clojure/nrepl/cmdline.clj:636~, ~socket.clj:96-111~, ~core.clj:189-239~): =System.Uri= adds a trailing slash to the host form (=F8=) → =as-nrepl-uri-string= by hand, =parse-uri= for =url-connect=.
+** Writers and output capture
+- JVM =*out*= chain: =PrintWriter= → =OutputStreamWriter= (platform default charset: latent mojibake at ~src/clojure/nrepl/middleware/print.clj:67~, ~util/out.clj:94-95~, fixed in PR 1b) → =CallbackBufferedOutputStream= (UTF-8). CLR: one =TextWriter= proxy; buffer semantics move from bytes to UTF-16 units.
+- =with-open= calls =.close= on the JVM, =.Dispose= on the CLR (=B7=); ~print.clj:81~ relies on close → flush → callback ordering, which a proxy =Dispose(bool)= preserves (=E10=).
+- =System/setOut= and =bindRoot= of =*out*= are process-global and never undone; =unwrap-standard-streams= is added (PR 5b). ClojureCLR's root =*out*= bypasses =Console.Out= and does not auto-flush (=E7=).
+- Line separators: =System/lineSeparator= → =Environment/NewLine= (=B12=).
+** Reflection, completion, lookup
+- No classpath. CLR sources: loaded assemblies (=AppDomain.CurrentDomain.GetAssemblies()=, guard =ReflectionTypeLoadException=), =CLOJURE_LOAD_PATH= dirs; the =with-classpath-cache= key must change (the classpath hash is a constant on the CLR, =L7=).
+- Object model: =Class→Type=, =getName→FullName= / =(str type)= (nested =A+B=, generics =List`1=), =getPackage→Namespace=, plus =GetProperties= / =GetEvents= (=get_X= / =set_X= accessors leak as =:method= unless filtered by =IsSpecialName=). New candidate kinds =:property=, =:event= (D8).
+- The ~53 Java =String= member calls in ~src/clojure/nrepl/util/completion.clj~ (31 on live paths) do not exist on the CLR and fail at runtime; 12 =.length= / =.charAt= sites have no =clojure.string= equivalent (=L7=). ClojureCLR's own =clojure.string= prefix/suffix/search functions are culture-sensitive (=B9=): PR 2's helper block gets ordinal CLR branches.
+- =Keyword.table= (JVM) vs =Keyword._symKeyMap= (CLR, =B11=). =ns-resolve= returns nil for unknown dotted symbols on both hosts (=B10=).
+- =io/resource= consumers: ~src/clojure/nrepl/version.clj~ and ~misc.clj:144-155~; var =:file= is load-path-relative on both hosts and =RT/FindFile= resolves it (=L8=).
+** Process, env, config
+- =System/exit= (4 sites), =shutdown-agents=, =(.join (Thread/currentThread))=, =deleteOnExit=, =sun.misc.Signal= live in =cmdline.clj= and go through the runtime seam from the CLR entry (=C11=).
+- =System/getProperty= is a compile error on the CLR: =java.version=, =java.specification.version=, =jdk.attach.allowAttachSelf=, =nrepl.version=, =user.home=, test =nrepl.basedir=. =misc/java-version= must be nil on the CLR (not 8), and its two consumers are in seams (=L2=).
+- ~src/clojure/nrepl/config.clj~ is filesystem/env only; =io/file= is 6 of its 16 sites; =Environment.GetFolderPath(UserProfile)= returns the home even with =HOME= unset (=L3=).
+- =describe= reports =:versions {:nrepl :clojure :java}= (~src/clojure/nrepl/middleware.clj:61-68~); the CLR adds =:clr= and both hosts add =:aux :host= (D13). =nrepl.version= is ="" = from a source checkout on both hosts.
+** Tests
+- =nubank/matcher-combinators=: 198 =is+= assertions in 12 files, 7 namespaces require =matcher-combinators.matchers= directly, 12 distinct matcher shapes (D9). ~test/clojure/nrepl/test_helpers.clj~ uses =com.hypirion.io Pipe=, =Runtime/exec=, =java.net.ServerSocket=, =future-cancel= (which blocks on a spinning body on the CLR, =TH9=); =kaocha=, =locksmith= are JVM-only; =test.check= needs =clr.test.check=.
+- ~core_test.clj~ (1068 LOC) encodes JVM interrupt/classloader/exception-text behaviour and must load first on the CLR (seven test namespaces require it); the per-line gating table is in slice 9.
+- Coverage gaps closed by the roadmap's new tests: thread naming, rendezvous backpressure, reader-loop termination, the forced-stop guarantees, surrogate handling, =unwrap-standard-streams=, =safe-handle=.
+
+* Corrections from loading the namespaces on ClojureCLR
+From L1–L8 in [[file:verify/results.org][verify/results.org]]:
+- =nrepl.spec= loads unchanged (0 sites, audited 4). =nrepl.util.lookup=, =nrepl.middleware.lookup=, =nrepl.middleware.completion=, =nrepl.util.print=, =nrepl.middleware.caught= load unchanged once their dependencies do.
+- =nrepl.middleware= needs one =#?= (the =java-version= map) plus the =:java= key; its =Var= field access is not a site.
+- =nrepl.misc= needs 8 inline =#?= (verdict "few", not "split"); the audit missed =Integer/parseInt= and =.printStackTrace=.
+- =nrepl.config= has 16 sites (audited 15); =nrepl.version= 8 as audited, but loads with =version-string ""= without a build-time value.
+- =nrepl.util.threading= has 30–34 sites (audited 24); 10 of its 12 top-level forms need the seam.
+- =nrepl.bencode= has 39–47 sites by form; the io-seam shape absorbed the read/write/UTF-8 sites; four categories were missing (=Arrays/sort=, =Keyword .sym=, array predicates, =MemoryStream=); the EOF test and the =extend-protocol= numbers option in the first draft were wrong.
+- =nrepl.transport= has ~78 sites of 23 kinds (audited 54); 5 kinds are runtime-only and invisible to a compile-driven count; =Semaphore= in the tty transport was not in the plan.
+- =nrepl.util.completion= has 166 host forms (audited 78); a strict one-fix-per-failure pass needed 21 iterations and 31 sites just to load it; three categories were missing (load-blocking type hints and =instance?= classes, =ReentrantLock= / =Iterable=, the regex optional-group semantics); accessor methods leak into member completion on the CLR.
+- The first audit's per-file table omitted 8 of the 24 test files; they are in the table above.
