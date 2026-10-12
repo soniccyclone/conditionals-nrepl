@@ -21,7 +21,7 @@ CI facts: CircleCI runs Clojure 1.12 on JDK 17/21/25/26, 1.12 + junixsocket on J
 * Phase 0. Fork hygiene (0.5 d)
 - DONE Baseline recorded on 2026-10-11 in a JDK 21 container: 178 tests, 0 failures; lint clean (=plan/verify/Containerfile.jvm=, =-e CLOJURE_VERSION=1.12= or the image's =ENV=).
 - DONE Removed the fork's release automation on branch =clr-port=: =.github/workflows/docs-dispatch.yml=, =.github/workflows/github-release.yml= and the CircleCI =deploy= job. =spell_checking.yml= and =libnrepl.yml= stay.
-- DONE =.clj-kondo/config.edn=: =:cljc {:features [:clj]}= added on =clr-port= (kondo has no =:cljr= language: =[:clj :cljr]= crashes it with "No matching clause: :cljr", and the default =[:clj :cljs]= makes every seam façade fail with "Invalid require: no libs specified to load", =J5=, dry run). =.cljfmt.edn=: add =:file-pattern #re "\\.clj[csrx]?$"= so =.cljr= files are formatted (=J6=).
+- DONE =.clj-kondo/config.edn=: =:cljc {:features [:clj]}= added on =clr-port=; =make kondo-clr= (advisory) lints the =:cljr= branches through a =:cljs=-rewritten copy with the overlay in =.clj-kondo/clr.edn= (kondo has no =:cljr= language: =[:clj :cljr]= crashes it with "No matching clause: :cljr", and the default =[:clj :cljs]= makes every seam façade fail with "Invalid require: no libs specified to load", =J5=, dry run). =.cljfmt.edn=: add =:file-pattern #re "\\.clj[csrx]?$"= so =.cljr= files are formatted (=J6=).
 
 * Phase 1. JVM refactors (8 d)
 Every slice: no behaviour change on the JVM unless called out, suite green, lint green, a CHANGELOG line where behaviour changes.
@@ -37,7 +37,7 @@ Files: ~src/clojure/nrepl/middleware/print.clj:67~, ~src/clojure/nrepl/util/out.
 Tests: a =print_test= case that runs the writer under =-Dfile.encoding=ISO-8859-1= (fork the test JVM, or set =sun.jnu.encoding= in a subprocess) and prints ="é"=.
 Acceptance: suite green; CHANGELOG "Bugs fixed: non-ASCII =:out= chunks were mangled on JVMs with a non-UTF-8 default charset".
 
-** Slice 2. Host-neutral compliment-lite (1 d) — D16
+** Slice 2. Host-neutral compliment-lite (1 d)
 Goal: the string and regex code in =nrepl.util.completion= (the vendored compliment-lite completion engine) stops using Java =String= members and Java-only semantics, so the reflect seam stays small. The file is edited freely.
 Files: ~src/clojure/nrepl/util/completion.clj~, ~test/clojure/nrepl/util/completion_test.clj~ (expectations unchanged).
 Steps:

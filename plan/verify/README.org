@@ -38,4 +38,4 @@ podman run --rm --security-opt label=disable -v "$PWD":/work -v "$HOME/.m2":/roo
 |---+---|
 | [[file:claims.org][claims.org]] | every empirical claim the plan makes, with its test method and the verdict after verification |
 | [[file:results.org][results.org]] | verification report: per-claim verdicts, evidence, and what changed in the plan |
-| [[file:threadnames.clj][threadnames.clj]] | PR 4 acceptance helper: prints the normalised multiset of nREPL thread names |
+| [[file:threadnames.clj][threadnames.clj]] | slice 4 acceptance helper: prints the normalised multiset of nREPL thread names |

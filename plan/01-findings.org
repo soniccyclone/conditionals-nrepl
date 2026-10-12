@@ -32,7 +32,7 @@ The first audit's total of 1 089 sites is a lower bound: counting by compile err
 | ~src/clojure/nrepl/middleware/print.clj~ | 205 | Java class → replacement | 25 |
 | ~src/clojure/nrepl/middleware/session.clj~ | 406 | host namespace split | 29 |
 | ~src/clojure/nrepl/misc.clj~ | 170 | few #? sites | 8 inline (=L2=) |
-| ~src/clojure/nrepl/server.clj~ | 239 | few #? sites after PR 3/6 | 27 |
+| ~src/clojure/nrepl/server.clj~ | 239 | few #? sites after slice 3/6 | 27 |
 | ~src/clojure/nrepl/socket.clj~ | 209 | JVM file; CLR sibling =.cljr= | 46 |
 | ~src/clojure/nrepl/socket/jdk17.clj~ | 26 | JVM-only | 8 |
 | ~src/clojure/nrepl/socket/junixsocket.clj~ | 28 | JVM-only | 9 |
@@ -41,7 +41,7 @@ The first audit's total of 1 089 sites is a lower bound: counting by compile err
 | ~src/clojure/nrepl/tls_client_proxy.clj~ | 260 | JVM-only until phase 3 | 50 |
 | ~src/clojure/nrepl/transport.clj~ | 283 | host namespace split | ~78 by form, 23 kinds, 5 runtime-only (=L5=) |
 | ~src/clojure/nrepl/util/classloader.clj~ | 27 | JVM-only | 7 |
-| ~src/clojure/nrepl/util/completion.clj~ | 682 | host namespace split (generated compliment-lite copy, D16) | 166 host forms, ~78 edits on live paths (=L7=) |
+| ~src/clojure/nrepl/util/completion.clj~ | 682 | host namespace split (vendored compliment-lite copy, edited freely) | 166 host forms, ~78 edits on live paths (=L7=) |
 | ~src/clojure/nrepl/util/jvmti.clj~ | 53 | JVM-only | 16 |
 | ~src/clojure/nrepl/util/lookup.clj~ | 39 | pure | 0 (=L8=) |
 | ~src/clojure/nrepl/util/out.clj~ | 100 | host namespace split | 12 |
@@ -113,12 +113,12 @@ The first audit's total of 1 089 sites is a lower bound: counting by compile err
 - Member names do not alias: =.exists= → =.Exists=, =.getParentFile= → =.Directory=; lookup is case-sensitive; a =def= evaluated at load turns such a runtime miss into a load failure (=config.clj=, =L3=).
 ** Exceptions and names
 - =Throwable= does not resolve: 15 sites in shared files (~misc.clj:17,28~, ~transport.clj:65,73,115~, ~server.clj:28,69~, ~ack.clj:49~, ~interruptible_eval.clj:134,159,161,169~) plus JVM-only files.
-- =.getMessage= → =ex-message= (24 hits, PR 1). =safe-handle= (~src/clojure/nrepl/transport.clj:261-283~) currently throws =MissingMethodException= on the CLR error path and the client receives nothing (=L8=).
-- =java.net.SocketException(String)= cannot be constructed on .NET; the disconnection exception goes through =nrepl.socket= (PR 3).
+- =.getMessage= → =ex-message= (24 hits, slice 1). =safe-handle= (~src/clojure/nrepl/transport.clj:261-283~) currently throws =MissingMethodException= on the CLR error path and the client receives nothing (=L8=).
+- =java.net.SocketException(String)= cannot be constructed on .NET; the disconnection exception goes through =nrepl.socket= (slice 3).
 - Map: =EOFException→EndOfStreamException=, =IllegalArgumentException→ArgumentException=, =IllegalStateException→InvalidOperationException=, =InterruptedException→ThreadInterruptedException=, =ClosedChannelException→SocketException(Interrupted)=, =URISyntaxException→UriFormatException=, =ThreadDeath→ThreadAbortException / OperationCanceledException= (=TH6=), =Compiler$CompilerException→Compiler+CompilerException=.
 - Wire-visible =:ex= / =:root-ex=: =(str (class e))= is ="class java.lang.X"= on the JVM and ="System.X"= on the CLR with the same expression (=B6=, D6). Tests at ~test/clojure/nrepl/core_test.clj:496-497,844-938~ match on these; =(/ 1 0)= throws =System.ArithmeticException= (=B1=).
 - Uncatchable on .NET: =StackOverflowException=, =AccessViolationException= (R13).
-- =format= uses Java-style specifiers on ClojureCLR (=B4=); =(str true)= is ="True"= and =(str 1.0)= is ="1"= (=L8=): =sanitize-meta= coerces booleans explicitly (PR 1).
+- =format= uses Java-style specifiers on ClojureCLR (=B4=); =(str true)= is ="True"= and =(str 1.0)= is ="1"= (=L8=): =sanitize-meta= coerces booleans explicitly (slice 1).
 - Unmatched optional regex groups are ="" = on the CLR, =nil= on the JVM (=L7=); =var-symbol?= and =split-by-leading-literals= in =completion= need =not-empty=.
 ** Threads, interrupt, executors
 - =Thread.interrupt= on the JVM is a sticky, pollable flag; =Thread.Interrupt= on .NET has no pollable flag, is latched until the next wait (=TH2=, =TH3=), wakes every =WaitSleepJoin= wait within ~1 ms (=TH1=) and never unblocks a socket read (=TH4=). Sites: ~src/clojure/nrepl/util/threading.clj:86~, ~transport.clj:59,62,67~, ~middleware/session.clj:223~, ~test/clojure/nrepl/core_test.clj:507~.
@@ -139,14 +139,14 @@ The first audit's total of 1 089 sites is a lower bound: counting by compile err
 - TLS: JSSE → =SslStream= with =CreateFromPem= over =AsSpan=, =CopyWithPrivateKey=, =CustomRootTrust= (=F7=); PEM scanning (~src/clojure/nrepl/tls.clj:84-149~) is pure. TLS tests already skipped on Windows.
 - =java.net.URI= (~src/clojure/nrepl/cmdline.clj:636~, ~socket.clj:96-111~, ~core.clj:189-239~): =System.Uri= adds a trailing slash to the host form (=F8=) → =as-nrepl-uri-string= by hand, =parse-uri= for =url-connect=.
 ** Writers and output capture
-- JVM =*out*= chain: =PrintWriter= → =OutputStreamWriter= (platform default charset: latent mojibake at ~src/clojure/nrepl/middleware/print.clj:67~, ~util/out.clj:94-95~, fixed in PR 1b) → =CallbackBufferedOutputStream= (UTF-8). CLR: one =TextWriter= proxy; buffer semantics move from bytes to UTF-16 units.
+- JVM =*out*= chain: =PrintWriter= → =OutputStreamWriter= (platform default charset: latent mojibake at ~src/clojure/nrepl/middleware/print.clj:67~, ~util/out.clj:94-95~, fixed in slice 1b) → =CallbackBufferedOutputStream= (UTF-8). CLR: one =TextWriter= proxy; buffer semantics move from bytes to UTF-16 units.
 - =with-open= calls =.close= on the JVM, =.Dispose= on the CLR (=B7=); ~print.clj:81~ relies on close → flush → callback ordering, which a proxy =Dispose(bool)= preserves (=E10=).
-- =System/setOut= and =bindRoot= of =*out*= are process-global and never undone; =unwrap-standard-streams= is added (PR 5b). ClojureCLR's root =*out*= bypasses =Console.Out= and does not auto-flush (=E7=).
+- =System/setOut= and =bindRoot= of =*out*= are process-global and never undone; =unwrap-standard-streams= is added (slice 5b). ClojureCLR's root =*out*= bypasses =Console.Out= and does not auto-flush (=E7=).
 - Line separators: =System/lineSeparator= → =Environment/NewLine= (=B12=).
 ** Reflection, completion, lookup
 - No classpath. CLR sources: loaded assemblies (=AppDomain.CurrentDomain.GetAssemblies()=, guard =ReflectionTypeLoadException=), =CLOJURE_LOAD_PATH= dirs; the =with-classpath-cache= key must change (the classpath hash is a constant on the CLR, =L7=).
 - Object model: =Class→Type=, =getName→FullName= / =(str type)= (nested =A+B=, generics =List`1=), =getPackage→Namespace=, plus =GetProperties= / =GetEvents= (=get_X= / =set_X= accessors leak as =:method= unless filtered by =IsSpecialName=). New candidate kinds =:property=, =:event= (D8).
-- The ~53 Java =String= member calls in ~src/clojure/nrepl/util/completion.clj~ (31 on live paths) do not exist on the CLR and fail at runtime; 12 =.length= / =.charAt= sites have no =clojure.string= equivalent (=L7=). ClojureCLR's own =clojure.string= prefix/suffix/search functions are culture-sensitive (=B9=): PR 2's helper block gets ordinal CLR branches.
+- The ~53 Java =String= member calls in ~src/clojure/nrepl/util/completion.clj~ (31 on live paths) do not exist on the CLR and fail at runtime; 12 =.length= / =.charAt= sites have no =clojure.string= equivalent (=L7=). ClojureCLR's own =clojure.string= prefix/suffix/search functions are culture-sensitive (=B9=): slice 2's helper block gets ordinal CLR branches.
 - =Keyword.table= (JVM) vs =Keyword._symKeyMap= (CLR, =B11=). =ns-resolve= returns nil for unknown dotted symbols on both hosts (=B10=).
 - =io/resource= consumers: ~src/clojure/nrepl/version.clj~ and ~misc.clj:144-155~; var =:file= is load-path-relative on both hosts and =RT/FindFile= resolves it (=L8=).
 ** Process, env, config

@@ -24,7 +24,7 @@ All decided on 2026-10-11; see [[file:05-decisions.org][05-decisions]]. Headline
 * Headline numbers
 - 68 files audited; the audit's 1 089 host sites are a lower bound (=transport= is ~78 sites, not 54; =completion= is 166 host forms, not 78; =misc= and =spec= are lighter than audited).
 - 91 claims verified in the =nrepl-clr= container (ClojureCLR 1.12.6 on .NET 8.0.31): see the totals line in [[file:verify/results.org][verify/results.org]]; two claims were refuted outright (=B9=: ClojureCLR's =clojure.string= is culture-sensitive too; =J5=: clj-kondo cannot lint =:cljr= branches) and several were partial in ways that changed the design (AOT needs net9+, the stdin proxy's =Peek= rules, the forced-stop exception types, =deps-clr.edn= replaces =deps.edn=).
-- 21 person-days over four phases; first editor connection to a ClojureCLR nREPL after slice 15, about day 16.
+- 21.5 person-days over four phases; first editor connection to a ClojureCLR nREPL after slice 15, about day 16.
 - JVM baseline at =df1ed8a= in the =nrepl-jvm= container: 178 tests, 0 failures; lint clean.
 
 * Method

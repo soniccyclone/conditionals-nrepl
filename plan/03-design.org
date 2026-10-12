@@ -138,7 +138,7 @@ No façade. =nrepl/socket.clj= and =nrepl/tls.clj= are untouched; =nrepl/socket.
 | =tls/ssl-context-or-throw=, =tls/server-socket=, =tls/socket=, =tls/accept=, =(tls/handshake-exception? e)= | | today's JSSE code; =SSLException= | phase 2: every fn throws =ex-info {:nrepl/kind ::tls-unsupported}=; phase 3: =SslStream= over the =NetworkStream=, PEM blocks split by the existing pure scanner then =X509Certificate2/CreateFromPem= with =(System.MemoryExtensions/AsSpan ^String s)= (strings cannot be passed to =ReadOnlySpan= parameters), =CopyWithPrivateKey=, =CertificateChainPolicy {TrustMode CustomRootTrust}=, =ClientCertificateRequired true=, name mismatch ignored like JSSE; =SslProtocols/Tls13= pins work on Linux (=F7=) |
 
 ** nrepl.util.reflect
-New seam used by =nrepl.util.completion= and =nrepl.util.lookup=. The compliment-lite string code is made host-neutral first (PR 2), so this seam is the reflection and classpath part only.
+New seam used by =nrepl.util.completion= and =nrepl.util.lookup=. The compliment-lite string code is made host-neutral first (slice 2), so this seam is the reflection and classpath part only.
 | Function | Contract | JVM | CLR |
 |---+---+---+---|
 | =(resolve-class ns sym)= | class or nil | =(let [v (ns-resolve ns sym)] (when (class? v) v))=; the =catch ClassNotFoundException= is dead on every supported JVM (=B10=) and goes | same |
@@ -233,7 +233,7 @@ orgPlanSequence('interrupt', {
 </script>
 #+END_EXPORT
 
-** Transport reader loop (rewritten in PR 4)
+** Transport reader loop (rewritten in slice 4)
 Today's loop (~transport.clj:57-67~) ends itself by interrupting its own thread, and its =InterruptedException= branch "works" only because =SynchronousQueue.put(nil)= throws (maintainer-lens review). The seam version, identical in behaviour on the JVM:
 #+begin_src clojure
 (let [read-queue (threading/make-rendezvous)
@@ -254,7 +254,7 @@ Today's loop (~transport.clj:57-67~) ends itself by interrupting its own thread,
 Everything a =.cljc= file still does with =#?=, listed so the implementer can grep. "both" means the same expression works on both hosts and the JVM code changes to it (behaviour-neutral).
 | File | Site | Disposition |
 |---+---+---|
-| every shared file | =(:require [clojure.java.io …])= | removed; the seams absorb every =io/= call (PR 5/7 acceptance: no =clojure.java.io= require in a =.cljc=) |
+| every shared file | =(:require [clojure.java.io …])= | removed; the seams absorb every =io/= call (slice 5/7 acceptance: no =clojure.java.io= require in a =.cljc=) |
 | =misc.clj:17,28=; =transport.clj:65,73,115=; =server.clj:28,69=; =ack.clj:49=; =interruptible_eval.clj:134,159,161,169= | =Throwable= (15 sites in shared files) | =#?(:clj Throwable :cljr Exception)= each; the JVM keeps =Throwable= because =QuotaExceeded= and =ThreadDeath= are =Error=s |
 | =misc.clj:42= | =java.util.UUID/randomUUID= | =#?(:clj (str (java.util.UUID/randomUUID)) :cljr (str (System.Guid/NewGuid)))= (=random-uuid= is 1.11) |
 | =misc.clj:21= | =.printStackTrace= | =runtime/print-stack-trace= |
@@ -262,7 +262,7 @@ Everything a =.cljc= file still does with =#?=, listed so the implementer can gr
 | =misc.clj:103-109,125=, =middleware.clj:44-47=, =config.clj:20=, =version.clj:29= | =System/getProperty= | =runtime= seam (=java-version= nil on the CLR; =version-string=; =home-dir=) |
 | =misc.clj:105,108=, =cmdline.clj:471=, =version.clj:46= | =Integer/parseInt= | =nrepl.misc/parse-int= = =#?(:clj (Integer/parseInt s) :cljr (Int32/Parse s))= (=parse-long= is 1.11) |
 | =misc.clj:152= | =io/resource= | =reflect/resource-path= |
-| =misc.clj:161-168= | =(update :macro str)= etc. | explicit boolean coercion =(if (boolean? v) (if v "true" "false") (str v))= (PR 1; =(str true)= is ="True"= on the CLR) |
+| =misc.clj:161-168= | =(update :macro str)= etc. | explicit boolean coercion =(if (boolean? v) (if v "true" "false") (str v))= (slice 1; =(str true)= is ="True"= on the CLR) |
 | =middleware.clj:67= | =:java= versions key | =#?(:clj :java :cljr :clr)= (D13) |
 | =bencode.clj:83,106,162,253,302= | =EOFException= / =IOException= / =IllegalArgumentException= constructors | =(new #?(:clj EOFException :cljr System.IO.EndOfStreamException) msg)= etc. |
 | =bencode.clj:94,99,116,187,196,263,275,308,321,368= | =^InputStream= / =^PushbackInputStream= / =^OutputStream= hints | =^#?(:clj InputStream :cljr System.IO.Stream)= etc.; =(.count ^IPersistentMap m)= → =^clojure.lang.Counted= (reflective on the CLR otherwise, =L1=) |
@@ -274,9 +274,9 @@ Everything a =.cljc= file still does with =#?=, listed so the implementer can gr
 | =transport.clj:49-50=, =server.clj:172-173= | =java.io.Closeable= on =FnTransport= / =Server= | =#?@(:clj [java.io.Closeable (close [_] …)] :cljr [System.IDisposable (Dispose [_] …)])= (=B7=) |
 | =transport.clj:62,67= | =InterruptedException=, self-interrupt | the reader loop above |
 | =transport.clj:87-89= | =<bytes= byte-array method | =(defmethod <bytes io/byte-array-class [input] (io/utf8-string input))= |
-| =transport.clj:101-119= | =rethrow-on-disconnection= | PR 3 predicate: =socket/closed-exception?=, any =EOFException= from bencode (=#?(:clj EOFException :cljr System.IO.EndOfStreamException)=), the ="EOF while reading"= message from =clojure.edn= (same text on both hosts; =EndOfStreamException= on the CLR, =L5=), =socket/disconnected?=, and =(not (socket/is-connected? s))=; throws =socket/disconnected-exception= with today's message |
+| =transport.clj:101-119= | =rethrow-on-disconnection= | slice 3 predicate: =socket/closed-exception?=, any =EOFException= from bencode (=#?(:clj EOFException :cljr System.IO.EndOfStreamException)=), the ="EOF while reading"= message from =clojure.edn= (same text on both hosts; =EndOfStreamException= on the CLR, =L5=), =socket/disconnected?=, and =(not (socket/is-connected? s))=; throws =socket/disconnected-exception= with today's message |
 | =transport.clj:181-212= | =tty=: =Semaphore=, =.write= / =.flush= on the writer, =LineNumberingPushbackReader= | =:clj=-only (=#?@(:clj [...])= around =tty= and =tty-greeting=); the verification matrix never runs =cmdline_tty= on the CLR |
-| =transport.clj:279= | =.getMessage= in =safe-handle= | =ex-message= (PR 1; on the CLR the error path currently throws =MissingMethodException= and the client gets nothing, =L8=) |
+| =transport.clj:279= | =.getMessage= in =safe-handle= | =ex-message= (slice 1; on the CLR the error path currently throws =MissingMethodException= and the client gets nothing, =L8=) |
 | =server.clj:54= | =(catch java.io.IOException …)= | =(catch #?(:clj java.io.IOException :cljr System.IO.IOException) e …)= |
 | =server.clj:63,67= | =SSLException=, =ClosedChannelException= catches | =(tls/handshake-exception? e)=, =(socket/closed-exception? e)= predicates inside one catch |
 | =server.clj:87= | =(catch SocketException _)= | =(socket/disconnected? e)= |
@@ -295,7 +295,7 @@ Everything a =.cljc= file still does with =#?=, listed so the implementer can gr
 | =interruptible_eval.clj:154-155= | =(.flush ^Writer *err*)= | =io/flush!= |
 | =print.clj:77-79,93-96= | =RT/iter= + =.hasNext= | =loop= / =recur= over =(seq keys)= (both; =RT/iter= returns an =IEnumerator= on the CLR) |
 | =print.clj:103=, =sanity_test= | =(str writer)= | =io/writer->string= |
-| =completion.clj= | see PR 2 and the reflect seam; the file is a generated compliment-lite copy, D16 | string helpers shim at the top of the file: =starts-with?= etc. are culture-sensitive on ClojureCLR too (=B9=), so the CLR branch uses =StringComparison/Ordinal=; =(Character/isUpperCase c)= → =#?(:clj … :cljr (Char/IsUpper c))=; =^Character= hint dropped; =.length= / =.charAt= → =count= / =nth= or =#?=; unmatched optional regex groups are ="" = on the CLR, =nil= on the JVM (=L7=): =(not-empty …)= at =var-symbol?= and =split-by-leading-literals=; =Iterable= loop → =seq=; =(sort-by :candidate …)= → ordinal comparator on the CLR |
+| =completion.clj= | see slice 2 and the reflect seam; the file is a generated compliment-lite copy, D16 | string helpers shim at the top of the file: =starts-with?= etc. are culture-sensitive on ClojureCLR too (=B9=), so the CLR branch uses =StringComparison/Ordinal=; =(Character/isUpperCase c)= → =#?(:clj … :cljr (Char/IsUpper c))=; =^Character= hint dropped; =.length= / =.charAt= → =count= / =nth= or =#?=; unmatched optional regex groups are ="" = on the CLR, =nil= on the JVM (=L7=): =(not-empty …)= at =var-symbol?= and =split-by-leading-literals=; =Iterable= loop → =seq=; =(sort-by :candidate …)= → ordinal comparator on the CLR |
 | =config.clj:53,60,72= | =^java.io.File= hints | =runtime= path functions return host objects; hints become =^#?(:clj java.io.File :cljr System.IO.FileInfo)= |
 | =load_file.clj:26-29= | compiler vars | =(runtime/load-file-bindings)= |
 | =cmdline.clj:20,431= | =FileNotFoundException= | in =nrepl.cmdline.options= (=.cljc=): =#?(:clj java.io.FileNotFoundException :cljr System.IO.FileNotFoundException)= |

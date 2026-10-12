@@ -46,7 +46,7 @@ D17's remaining content: =nrepl.cmdline.options= (=.cljc=, pure parsing and mess
 | R4 | =Thread.Interrupt= consumed by a user =catch= (=TH3=) or lost inside an STM lock wait (=TH8=) | low | the 5 s forced stop is the backstop |
 | R6 | Windows: PEM private keys unusable by SChannel | certain | PFX round-trip when TLS is ported; TLS tests are already skipped on Windows |
 | R7 | Culture-sensitive string operations on the CLR: ClojureCLR's own =clojure.string= prefix/suffix/search functions and =sort= on strings are culture-sensitive (=B9=) | certain if ported naively | the string-helper block in =completion= with =StringComparison/Ordinal= branches; =DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1= documented |
-| R8 | =clj-kondo= cannot lint =:cljr= branches (=J5=) | certain | =:cljc {:features [:clj]}=; CLR coverage comes from the CLR suite with reflection warnings as errors |
+| R8 | =clj-kondo= cannot lint =:cljr= branches (=J5=) | certain | =:cljc {:features [:clj]}= for the gate; =make kondo-clr= lints the =:cljr= branches through a =:cljs=-rewritten copy (advisory, exclude overlay in =.clj-kondo/clr.edn=); CLR coverage comes from the CLR suite with reflection warnings as errors |
 | R9 | ClojureCLR 1.13 changes break assumptions | low in 2026 | pin 1.12.6; CI also runs =1.13.0-alpha= as allowed-failure |
 | R10 | Core load on net8 is 2.5 s (=A10=) and AOT is unavailable on net8 builds (=A5=) | certain | document; AOT through a net9+ =Clojure.Main= build step later |
 | R11 | Test harness cost (matcher shim, process spawning, cert generator, 24 test files to gate) | certain | slice 9 budgets 1.5 d with the per-file gating tables |
