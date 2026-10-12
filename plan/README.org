@@ -1,0 +1,35 @@
+#+TITLE: Plan: nREPL on reader conditionals, ClojureCLR first
+#+OPTIONS: ^:nil toc:2 num:nil
+#+DATE: 2026-10-11
+
+Planning only; nothing under =src/=, =test/=, =build/= or =doc/= is changed on this branch. Base =d00d171= (post-1.8.0). Second revision, 2026-10-11: the game-engine framing of the first draft is gone, 91 empirical claims were run in a container and adversarially refuted, the interrupt decision follows Nathan's call for a real forced stop, a Sonnet dry run implemented slice 4 from the spec, and four reviews (maintainer lens, CLR API, test impact, interop coverage) were folded in. Third revision: Nathan's decisions applied and every upstream consideration removed.
+
+* Goal
+Convert =src/clojure/nrepl/**.clj= to =.cljc= with =#?(:clj … :cljr …)= plus a thin set of host seams in the existing =nrepl.util.*= namespaces, so one source tree yields a full nREPL (sessions, interrupt with forced stop, stdin, print, completion, lookup, load-file, describe) on ClojureCLR 1.12.6 / .NET 8+, started with =Clojure.Main -m nrepl.cmdline= or =nrepl.server/start-server= from any .NET process. JVM behaviour is preserved. CLJS and jank stay possible and otherwise untouched.
+
+* Files
+| File | Content |
+|---+---|
+| [[file:01-findings.org][01-findings]] | what the code does today, with the corrections from loading eight namespaces on ClojureCLR |
+| [[file:02-facts.org][02-facts]] | the ClojureCLR / .NET 8 / tooling facts the design relies on, each with its verified status |
+| [[file:03-design.org][03-design]] | the spec: seam signatures with JVM and CLR bodies, the exact proxy shapes, the interrupt policy, the eval/interrupt diagram, the inline =#?= sites per file |
+| [[file:04-roadmap.org][04-roadmap]] | work orders per slice: files, steps, tests to add, acceptance |
+| [[file:05-decisions.org][05-decisions]] | decision register D1–D17 with evidence and recommendations, risks, NOGO |
+| [[file:06-prior-art.org][06-prior-art]] | clr.tools.nrepl and ClojureCLR source facts |
+| [[file:verify/README.org][verify/]] | the containers, the claims register with verdicts, the verification results, the thread-name acceptance script |
+
+* Decisions
+All decided on 2026-10-11; see [[file:05-decisions.org][05-decisions]]. Headlines: forced stop is the interrupt (D3); one thread per task everywhere (D1/D2); a C# helper assembly instead of proxies (D5); a pure-Clojure error abstraction with host mapping at the seams (D6); seams in the existing =nrepl.util.*= namespaces with sibling =.cljr= files only where hosts share nothing (D11). This is a heavily modified fork: nothing is shaped for upstream review, and distribution is out of scope until the project works.
+
+* Headline numbers
+- 68 files audited; the audit's 1 089 host sites are a lower bound (=transport= is ~78 sites, not 54; =completion= is 166 host forms, not 78; =misc= and =spec= are lighter than audited).
+- 91 claims verified in the =nrepl-clr= container (ClojureCLR 1.12.6 on .NET 8.0.31): see the totals line in [[file:verify/results.org][verify/results.org]]; two claims were refuted outright (=B9=: ClojureCLR's =clojure.string= is culture-sensitive too; =J5=: clj-kondo cannot lint =:cljr= branches) and several were partial in ways that changed the design (AOT needs net9+, the stdin proxy's =Peek= rules, the forced-stop exception types, =deps-clr.edn= replaces =deps.edn=).
+- 21.5 person-days over four phases; first editor connection to a ClojureCLR nREPL after slice 15, about day 16.
+- JVM baseline at =df1ed8a= in the =nrepl-jvm= container: 178 tests, 0 failures; lint clean.
+
+* Method
+- Code read in full by the planner; eight audit agents in the first draft.
+- One agent per claim batch ran experiments in the container; two independent skeptics per thread-semantics claim and per refuted or plan-changing claim; a completeness pass listed what the register missed.
+- A Sonnet agent implemented slice 4 from the spec in a throwaway worktree: three blockers (kondo config, the reaper's executor, a test's private var) and a start-order race were found and are now in the work order; with the fixes it reached a green suite in one run.
+- Four review lenses on the design and roadmap; their findings are folded in and the planner's rulings are recorded in 03-design §Shape and 05-decisions.
+- Rendering: the docs follow the org-plan skill format; render with Emacs + htmlize (the =org-render= container used here mirrors the skill's build file).

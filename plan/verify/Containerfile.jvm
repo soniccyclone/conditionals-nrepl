@@ -1,0 +1,6 @@
+FROM docker.io/library/clojure:temurin-21-tools-deps-bookworm-slim
+ENV CLOJURE_VERSION=1.12
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends make git gcc libc6-dev procps \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /work

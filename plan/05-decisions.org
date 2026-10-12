@@ -1,0 +1,65 @@
+#+TITLE: 5. Decisions, risks, NOGO
+#+OPTIONS: ^:nil toc:2 num:nil
+#+DATE: 2026-10-11
+#+TODO: DECIDE RISK | DONE REMOVED
+
+Ids are stable across revisions. Decided items record Nathan's call and the date. This is a heavily modified fork: nothing here is shaped for anyone else's review, and distribution is out of scope until the project works. Evidence ids refer to [[file:verify/claims.org][verify/claims.org]].
+
+* Decision register
+** DONE D3. Interrupt of a CPU-bound eval (2026-10-11)
+Forced stop is the primary mechanism, mirroring the JVM's =interrupt-stop= (interrupt, wait 5 s, kill). The CLR kill primitive is =System.Runtime.ControlledExecution.Run= (=TH5=, =TH6=, =TH7=), driven by a re-interrupt plus =Cancel= from a dedicated reaper thread. Only an opt-out key =:force-interrupt= (default true). Spec in [[file:03-design.org::*Interrupt policy (D3, decided: forced stop is primary)][03-design §Interrupt policy]].
+
+** DONE D1, D2. Threads and executors (2026-10-11)
+One thread per task, everywhere: every executor spawns a named background thread per submitted task, for the long-lived loops, the per-message handler work and the ephemeral evals alike. This is what the JVM's cached pools amount to (thread-per-task with reuse), so it is the faithful port; it removes the =:loop= / =:pool= distinction, the .NET pool starvation hazard and unnamed threads. Thread creation is tens of microseconds per message. Evidence: =TH1=, =TH12=, =TH13=, =C4=.
+
+** DONE D5. Replacement for the Java helper classes (2026-10-11)
+A small C# assembly, =src/csharp/nrepl/=, mirroring =src/java/nrepl/= one to one: =QueuePollingReader= (=TextReader=), =CallbackBufferedWriter=, =QuotaBoundWriter=, =TeeWriter= (=TextWriter=), built with =dotnet build= as part of the CLR build. It removes the verified proxy landmines (name-based overload dispatch, the generated =Span= overloads that throw =InvalidProgramException=, the locking requirement, =C1=, =C2=) and runs at ~4 ns per call instead of ~15 (=C3=). The proxy shapes in 03-design stay as the verified fallback if the build step is ever unwanted.
+
+** DONE D6. Errors (2026-10-11)
+Every error nREPL itself raises is a pure Clojure =ex-info= with a =:nrepl/kind= keyword and a human-readable message; each host maps its native exceptions into those kinds at the seam (=::disconnected=, =::listener-closed=, =::quota-exceeded=, =::tls-unsupported=, =::stopped=, =::eof=). User exceptions escaping =eval= keep the host's own class name in =:ex= / =:root-ex= (they are the user's exceptions; =(str (class e))= already gives the host spelling, =B6=), and the reply gains a host-neutral =:ex-kind=. Spec in [[file:03-design.org::*Errors (D6)][03-design §Errors]].
+
+** DONE D7. TLS timing (2026-10-11)
+Stub on the CLR (every fn throws =::tls-unsupported=) until the first editor connection works, then port with =SslStream= (=F7= proves the mutual-auth handshake feasible).
+
+** DONE D8. Type-name spelling in completion and lookup on the CLR (2026-10-11)
+ClojureCLR's own: =Outer+Inner=, =List`1=, what =(str type)= gives (=B6=); per-host expectation tables in =completion_test=.
+
+** DONE D9. =matcher-combinators= on the CLR (2026-10-11)
+=nrepl.test-helpers.match= (~200 lines, the 12 matcher shapes the suite uses, readable mismatch report) plus a CLR-only =matcher_combinators/matchers.cljr= stub so the 7 files that require the library load unchanged; the JVM keeps the real library. Usage measured: 198 =is+= assertions in 12 files.
+
+** DONE D11. File strategy (2026-10-11)
+Seams in the existing =nrepl.util.*= namespaces (=.cljc= façade + =*/jvm.clj= + =*/clr.cljr=), and sibling =.cljr= files only where the two hosts share nothing (=socket=, =tls=, =cmdline= entry). Inline =#?= only where a seam would be silly; never scattered through the heavy files (=transport= ~78 sites, =completion= 166 host forms, =L5=, =L7=).
+
+** DONE D13. =describe= versions key for the host (2026-10-11)
+=:clr= plus =:aux {:host {:name "jvm"|"clr" :can-stop-threads bool}}= on both hosts.
+
+** DONE D14. When to rename =.clj= → =.cljc= (2026-10-11)
+In the slice that empties the file of interop; slice 8 renames the rest.
+
+** REMOVED D4, D12 (game-engine hosting), D10 (distribution: out of scope until the project works), D15 and D17's upstream framing (this fork is not shaped for upstream), D16 (the vendored compliment-lite copy is simply edited; it is the completion engine, not an nREPL implementation).
+D17's remaining content: =nrepl.cmdline.options= (=.cljc=, pure parsing and messages) is extracted so the CLR entry =cmdline.cljr= can reuse it; =cmdline.clj= stays the JVM entry.
+
+* Risks
+| Id | Risk | Likelihood | Mitigation |
+|---+---+---+---|
+| R2 | A forced stop lands inside user code that holds a lock or a half-updated structure; on the CLR a user =catch Exception= handler runs during the abort, a loop that never leaves a =catch= / =finally= cannot be stopped, and an undeliverable abort parks the reaper thread in =Cancel= (=TH6=, =TH7=) | medium | same exposure class as JVM =Thread.stop=; documented in the =interrupt= op; =:force-interrupt false= opt-out |
+| R4 | =Thread.Interrupt= consumed by a user =catch= (=TH3=) or lost inside an STM lock wait (=TH8=) | low | the 5 s forced stop is the backstop |
+| R6 | Windows: PEM private keys unusable by SChannel | certain | PFX round-trip when TLS is ported; TLS tests are already skipped on Windows |
+| R7 | Culture-sensitive string operations on the CLR: ClojureCLR's own =clojure.string= prefix/suffix/search functions and =sort= on strings are culture-sensitive (=B9=) | certain if ported naively | the string-helper block in =completion= with =StringComparison/Ordinal= branches; =DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1= documented |
+| R8 | =clj-kondo= cannot lint =:cljr= branches (=J5=) | certain | =:cljc {:features [:clj]}= for the gate; =make kondo-clr= lints the =:cljr= branches through a =:cljs=-rewritten copy (advisory, exclude overlay in =.clj-kondo/clr.edn=); CLR coverage comes from the CLR suite with reflection warnings as errors |
+| R9 | ClojureCLR 1.13 changes break assumptions | low in 2026 | pin 1.12.6; CI also runs =1.13.0-alpha= as allowed-failure |
+| R10 | Core load on net8 is 2.5 s (=A10=) and AOT is unavailable on net8 builds (=A5=) | certain | document; AOT through a net9+ =Clojure.Main= build step later |
+| R11 | Test harness cost (matcher shim, process spawning, cert generator, 24 test files to gate) | certain | slice 9 budgets 1.5 d with the per-file gating tables |
+| R12 | Rendezvous relaxation changes backpressure | low | =make-rendezvous= on =Monitor= (=C7=); =rendezvous-backpressure= test pins it |
+| R13 | =StackOverflowException= is uncatchable on .NET | certain | document; out of scope to guard |
+| R14 | =ControlledExecution.Run= overhead per exec | low | measure in slice 11 |
+| R15 | Silent runtime failures on the CLR: missing members compile with only a reflection warning (=B2=, =E9=, =L5=), the 1-arg =Write= resolves to a =Span= overload (=E2=), =RT/classForName "[B"= returns nil (=L5=) | certain without a gate | CLR CI treats reflection warnings in =nrepl.*= as errors and executes every code path |
+| R16 | The C# assembly adds =dotnet build= to the CLR build | certain | the SDK is already required for =Clojure.Main=; one =csproj=, built by the test script |
+
+* NOGO
+- Inline =#?= as the strategy for =transport=, =completion=, =tls=, =cmdline=.
+- =.cljr= override files for shared logic (siblings only for =socket=, =tls=, =cmdline= where nothing is shared).
+- A cooperative-only interrupt (D3).
+- =random-uuid=, =parse-long= or other Clojure 1.11+ core functions in shared code while the fork supports 1.10 (drop this rule if the fork raises its minimum Clojure).
+- Shaping any change for an upstream reviewer, or any distribution work, until the project works.
+- Any game-engine, editor-host or main-thread-dispatch feature in the library.

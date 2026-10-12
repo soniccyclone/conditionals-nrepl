@@ -1,4 +1,5 @@
 {:output            {:progress true}
+ :cljc              {:features [:clj]}
  :config-in-comment {:linters {:unused-value         {:level :off}
                                :unresolved-namespace {:level :off}}}
  :linters           {:unused-private-var {:level   :warning}

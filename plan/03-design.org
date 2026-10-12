@@ -1,0 +1,304 @@
+#+TITLE: 3. Design: host seams, exact signatures, interrupt
+#+OPTIONS: ^:nil toc:2 num:nil
+#+DATE: 2026-10-11
+
+This is the specification an implementer follows. Every seam function has a signature, a JVM body (today's code, moved) and a CLR body (the .NET API it wraps). Claim ids such as =TH6= or =C2= point at [[file:verify/claims.org][verify/claims.org]]; their evidence is in [[file:verify/results.org][verify/results.org]]. Line numbers are those of commit =d00d171= (=df1ed8a= adds only =plan/= files). Second revision: incorporates the verification run, a Sonnet dry run of slice 4, and four reviews (maintainer lens, CLR API, test impact, interop coverage). Third revision: Nathan's decisions of 2026-10-11 (one thread per task, a C# helper assembly, a pure-Clojure error abstraction); nothing here is shaped for upstream, this is a heavily modified fork.
+
+* Shape
+One source tree, two load paths.
+- Shared files are =.cljc=. A shared file never names a host type; it calls a seam, or uses one of the inline =#?= forms listed in [[Inline sites in shared files]].
+- A seam is the *existing* namespace where one exists (=nrepl.util.threading=, =nrepl.util.out=), or a new =nrepl.util.*= namespace (=nrepl.util.io=, =nrepl.util.reflect=, =nrepl.util.runtime=). The seam file is =.cljc=; its =ns= form requires the host implementation conditionally and re-exports it. Implementations live beside it: =nrepl.util.threading.jvm= (=threading/jvm.clj=) and =nrepl.util.threading.clr= (=threading/clr.cljr=). No parallel =nrepl.host.*= tree.
+- Two namespaces share nothing between hosts and are not seamed: =nrepl.socket= and =nrepl.tls= stay =.clj= untouched, and the CLR load path carries =nrepl/socket.cljr= and =nrepl/tls.cljr= that define the same public functions (ClojureCLR loads =.cljr= before =.clj=, =A3=; the JVM never reads a =.cljr=). Shared code calls only the contract table below, so either file suffices.
+- =nrepl.cmdline= stays =.clj=. Its pure half (option parsing, help text, =server-opts=, URL helpers) is extracted into =nrepl.cmdline.options= (=.cljc=); the CLR gets a server-only =nrepl/cmdline.cljr= entry on top of it (D17).
+- Every seam namespace carries ={:no-doc true}= and a docstring "internal host seam". Shared code only calls what the tables below list.
+
+Mechanics an implementer must know (all verified):
+- A façade =(def f impl/f)= copies the value: the façade var has none of the impl var's metadata, =definline= inlining is lost through it, and =with-redefs= on the impl var is invisible through the façade. Therefore: hot byte primitives stay inline in =nrepl.bencode= (see the io seam), macros that must expand differently per host live in the =.cljc= façade with =#?= inside the macro body, and tests redefine impl vars by their impl namespace.
+- Inline conditional type hints work on both hosts: =[^#?(:clj Thread :cljr System.Threading.Thread) t]= and =#?(:clj ^Thread t :cljr t)= (=L6=, =L5=, =L7=). A hint naming a host type that does not exist is a hard compile error on the CLR (=L3=), and =^{:tag #?(:clj Character :cljr Char)}= on a fn parameter fails because =Char= is a value type (=L7=): drop such hints.
+- A reader conditional in operator position, =(#?(:clj .read :cljr .ReadByte) x)=, works on both hosts, including inside a =definline= body (=L1=). The =Foo.= constructor sugar cannot hold =#?=; write =(new #?(:clj EOFException :cljr System.IO.EndOfStreamException) msg)=.
+- On ClojureCLR only the =System= namespace is auto-imported (=L2=, =L6=): =Thread=, =ThreadStart=, =Integer=, =Long=, =Character=, =Class=, =Iterable=, =Arrays=, =Semaphore= and every =java.*= name resolve to nothing. =Integer/parseInt=, =Long/MAX_VALUE=, =Character/isUpperCase= are compile errors; =Math/…=, =String/valueOf= compile and fail at runtime.
+- A call to a missing member on a hinted receiver (=(.getMessage ^Exception e)=, =(.ready r)=, =(.write ^TextWriter w s)=) compiles with a reflection warning and throws =MissingMethodException= at runtime (=B2=, =E9=, =L5=). Loading a namespace proves little; CLR CI must execute the code and treat reflection warnings in =nrepl.*= as errors.
+- A =#?(:cljr nil)= stub does not neutralize a later interop call on the stubbed value: =(let [p nil] (.load p x))= is a compile error on the CLR (=L3=). Gate the call, not just the value.
+- Every thread the CLR impl creates runs its body under an outermost =(try (f) (catch Exception e (misc/log e …)))= with no rethrow: an uncaught exception on any managed thread, foreground or background, terminates the process (=TH13=).
+- =by-ref= out-parameters work only on a statically resolved call with a local whose static type is exactly the parameter type, and not inside a non-tail =try= (=C8=, =TH= extra); seam wrappers that need =TryTake=, =TryParse= are top-level =defn=s with hinted parameters.
+- Combine enum flags with =enum-or=, never =bit-or= (=A7=, =B11=).
+- Long to Int32 narrowing is checked: =Int64/MaxValue= as a millisecond argument throws =ArgumentException= at the call site (=C8=); clamp inside the seam.
+- =(str true)= is ="True"= on the CLR, =(str 1.0)= is ="1"= (=L8=); shared code that stringifies booleans for the wire coerces them explicitly.
+- =random-uuid= and =parse-long= are Clojure 1.11; nREPL supports 1.10, so they are not portable replacements (=L2= refuter). Use one-line =#?= forms.
+
+Why this shape and not the others is scored in [[file:05-decisions.org][05-decisions]] D11 (decided).
+
+* Seams
+** nrepl.util.threading
+Façade = today's namespace, renamed =.cljc=. Public vars that stay: =run-with=, =listen-executor=, =transport-executor=, =handle-executor=, =interrupt-stop=, =force-stop-delay-ms= (becomes public, read by the impls), and under =#?(:clj …)= =thread-factory=. Removed: =thread-reaper-executor= (the reaper becomes private to the impl; CHANGELOG line). New: =connection-executor=.
+Replaces ~src/clojure/nrepl/util/threading.clj~ (whole), ~src/clojure/nrepl/middleware/session.clj:40-43,143-159,196-235,265~, ~src/clojure/nrepl/transport.clj:44-79,189-212,243-254~, ~src/clojure/nrepl/middleware/interruptible_eval.clj:46-51~; call sites in ~server.clj:46-48,80-91,234-237~ and ~util/out.clj:51~ keep their =run-with= syntax.
+
+| Function | Contract | JVM (=nrepl.util.threading.jvm=) | CLR (=nrepl.util.threading.clr=) |
+|---+---+---+---|
+| =(make-executor {:name-fmt s})= → executor | one thread per submitted task, named from today's =%d= format, e.g. ="nREPL-handler-%d"= (D1/D2: no pool anywhere) | =(Executors/newCachedThreadPool (thread-factory name-fmt))=, which is thread-per-task with reuse | thread-per-task: =Thread= + =gen-delegate ThreadStart= (=C4=; =sys-action= is rejected by =Thread=), =IsBackground=true=, =Name= from the format and a counter, body wrapped in the catch-all (=TH13=) |
+| =(submit! executor f)= → handle | runs =f= (0-arg) asynchronously; returns a cancellable handle | =(.submit executor ^Runnable f)= | starts the thread; the handle holds a cancelled flag and the thread; the wrapper binds a thread-local reference to the handle for =cancelled?= / =cancel-current!= |
+| =(cancel! handle)= | sets the handle's cancelled flag and interrupts its thread if it is blocked in a wait | =(.cancel fut true)= | set flag; =(.Interrupt thread)= when the handle owns one (=TH1=) |
+| =(cancelled?)= | zero-arg: true once =cancel!= or =cancel-current!= was called for the task running on the current thread; loops test it instead of =Thread/interrupted= | =(Thread/interrupted)= (clears the flag, as today) | read the thread-local handle's flag |
+| =(cancel-current!)= | the task marks itself cancelled (the reader loop does this after a transport failure, ~transport.clj:67~) | =(.interrupt (Thread/currentThread))= | set the current handle's flag |
+| =(make-queue)= → queue | unbounded blocking FIFO | =(LinkedBlockingQueue.)= | =|System.Collections.Concurrent.BlockingCollection`1[System.Object]|= (=C8=) |
+| =(make-rendezvous)= → queue | zero-capacity handoff: =put!= returns only after another thread took the item, or at once once the owning task is cancelled (dropping the item) | =(SynchronousQueue.)= | =Monitor=-based one-slot handoff; =Pulse= inside =locking= (=C7=); =put!= checks the cancelled flag; =cancel!='s =Interrupt= wakes a blocked =put!= |
+| =(put! q x)= / =(take! q)= | blocking put / take | =.put= / =.take= | =.Add= / =.Take= (=Take= throws =ThreadInterruptedException= on interrupt, =TH1=) |
+| =(poll! q)= / =(poll! q timeout-ms)= → item or nil | 1-arity returns at once (nil if empty; the tty transport uses it); 2-arity waits up to =timeout-ms=, nil on timeout; =timeout-ms= may be =infinite-ms= | =(.poll q)= / =(.poll q ms TimeUnit/MILLISECONDS)= | =TryTake= via a top-level =defn= with =^|BlockingCollection…|= and =^long= hints and an untyped nil local for the out value; clamp =(> ms Int32/MaxValue)= to =System.Threading.Timeout/Infinite= (=C8=) |
+| =infinite-ms= | a value: the wait-forever timeout in ms | =Long/MAX_VALUE= | =Timeout/Infinite= (-1) |
+| =(schedule-once! f delay-ms)= | runs =f= once after =delay-ms= on a scheduler the impl owns; no executor argument (a cached pool cannot schedule, dry run) | private =(delay (Executors/newScheduledThreadPool 0 (thread-factory "nREPL-thread-reaper-%d")))= in the impl, =.schedule= with =TimeUnit/MILLISECONDS= | a dedicated background thread per call that sleeps then runs =f= (a =System.Threading.Timer= can be collected before it fires and parks a pool thread when =f= blocks: =TH11=, CLR review) |
+| =(session-thread name run-fn)= → sthread | creates, without starting, a daemon thread that will call =run-fn= once; the handle also carries the =cts-slot= used by =run-interruptible= | =(SessionThread. run-fn name (classloader/dynamic-classloader))= | =Thread= + =gen-delegate ThreadStart=, =IsBackground=true=, name set, optional =maxStackSize= from =(:thread-opts config)= (=C5=; default stack is =ulimit -s= on Linux, 1 MB on Windows) |
+| =(start-session-thread! sthread)= | starts it; the caller publishes the handle in its state atom *before* this call because =run-fn= reads the atom (dry run reproduced the race) | =(.start t)= | =(.Start t)= |
+| =(run-interruptible sthread & body)= macro | runs =body= on the current (session) thread so that =interrupt-stop= can kill it; returns the body's value, or nil when the body was killed | expands to =(do ~@body)=: zero added frames | expands to =(impl/run-interruptible* sthread (fn [] ~@body))=: new =CancellationTokenSource= stored in the handle's =cts-slot=, =(ControlledExecution/Run (gen-delegate System.Action [] (vreset! ret (f))) (.Token cts))=, =@ret=; catches =stop-exception?= and returns nil; clears the slot in =finally=; never disposes the source (=TH6=, CLR review) |
+| =(interrupt-stop sthread delay-ms)= | the nREPL interrupt policy: interrupt now; if the thread is still alive after =delay-ms=, kill it. =nrepl.util.threading/interrupt-stop= is =(impl/interrupt-stop t force-stop-delay-ms)= and the 1-arity stays public | today's body moved: =.interrupt=, then =schedule-once!= → =try-stop-thread= (=Thread.stop= / JVMTI) if not terminated | =.Interrupt=, then =schedule-once!=: if =(.IsAlive t)=, =.Interrupt= again (wakes a wait entered since, =TH3=, =TH7=) and immediately =(.Cancel cts)= with =cts= read from the slot at that moment (=TH6=); =Cancel= blocks until the abort is delivered, so it runs on the reaper thread, never on a handler thread |
+| =(stop-exception? e)= | true when =e= or anything in its cause chain is the exception a forced stop injects; =interruptible-eval='s =caught= uses it to suppress the =:eval-error= reply (~interruptible_eval.clj:117-124~). A plain interrupt of a sleeping eval is *not* a stop: the JVM reports =:ex "class java.lang.InterruptedException"= (~core_test.clj:477-501~) and the CLR reports =ThreadInterruptedException= the same way | today's =interrupted?= moved verbatim (=ThreadDeath= as =root-cause=, or a =Compiler$CompilerException= whose cause is =ThreadDeath=) | walk =.InnerException= for =System.Threading.ThreadAbortException= or =System.OperationCanceledException= (inside the body user code sees =ThreadAbortException=; =Run= surfaces =OperationCanceledException=, or a =Compiler+CompilerException= wrapping the abort when it lands in the compiler, =TH6=); do not use =root-cause=, which stops at =CompilerException= on the CLR |
+| =(alive? sthread)= | true from =start-session-thread!= until =run-fn= returned | =(not= (.getState t) Thread$State/TERMINATED)= | =(.IsAlive t)= (=TH12=) |
+
+Executors: =listen-executor= ="nREPL-server-%d"=; =connection-executor= ="nREPL-connection-%d"= (new; the per-connection =handle= loop at ~server.clj:80~ moves here from =handle-executor=); =transport-executor= ="nREPL-transport-%d"= (reader loops; the stdout callbacks at ~util/out.clj:51~ move to =handle-executor=); =handle-executor= ="nREPL-handler-%d"=; =ephemeral-executor= ="nREPL-ephemeral-session-%d"= in =nrepl.middleware.session=. All are thread-per-task on both hosts (D1/D2); on the JVM only two thread-name prefixes change (connection, callbacks).
+
+*** Interrupt policy (D3, decided: forced stop is primary)
+The CLR mirrors the JVM =interrupt-stop= exactly; only the kill primitive differs. .NET 8 ships =System.Runtime.ControlledExecution.Run= (=TH5=, =TH6=): it aborts the thread at its next safe point, which includes the back-edge of a tight =loop/recur= (16–18 ms after =Cancel= for every loop shape tested), runs =finally= blocks, surfaces =OperationCanceledException= to the caller of =Run=, and leaves the runtime usable afterwards. Inside the aborted body a user =(catch Exception …)= handler runs but cannot swallow the abort; the abort is re-raised when the handler exits. Because =Run= wraps the body rather than targeting a thread, every exec runs through =run-interruptible= on the session thread, and the reaper is the only caller of =Cancel=.
+
+What the kill cannot do, stated as .NET facts (=TH7=): it does not reach a thread inside a wait (=Sleep=, =Monitor.Wait=, a queue =Take=) or a native call until that call returns, which is why the reaper re-interrupts first (=Interrupt= wakes every wait, =TH1=); it is deferred while the thread is inside a =catch= block and never delivered to a loop that stays inside a =catch= or =finally=; =Cancel= blocks its caller until delivery, so an undeliverable abort parks the reaper thread too (two zombies, R2). The same limits apply to =Thread.stop= on the JVM.
+
+Behaviour on a successful kill is unchanged from the JVM: the =:interrupt= fn CASes =:running= to nil, calls =interrupt-stop=, and =reset-state= starts a fresh session thread and queue (~session.clj:239-252~); the killed thread's =caught= hook sees =stop-exception?= and sends nothing; =run-interruptible= swallows the =Run= exception so the session loop's =(catch Exception …)= never runs =reset-state= a second time (CLR review blocker 1); the loop's CAS then fails and the thread exits. The client gets =:interrupted :done= from the interrupt reply.
+
+Opt-out only: =(:force-interrupt config true)=, read by =interrupt-stop= on both hosts; when false it interrupts and does not schedule the kill. Documented next to =:enable-jvmti-agent= in =doc/modules/ROOT/pages/usage/server.adoc= and in the =interrupt= op docstring. =describe= gains =:aux {:host {:name "jvm"|"clr" :can-stop-threads bool}}= (D13).
+
+** nrepl.util.io
+New seam for readers, writers, stdin and byte-level values that are not on the bencode hot path. Replaces ~transport.clj:24-33,81-89,128-130,137-155,163-179,186-212~, ~session.clj:17-18,45-53,173,386-397~, ~middleware/print.clj:11-15,50-69~, ~middleware/interruptible_eval.clj:16-19,25-44,53-55,65-70,103,112-116,152-155,192-193~, ~config.clj:62-66~, and ~src/java/nrepl/in/QueuePollingReader.java~, ~src/java/nrepl/out/*.java~ (which stay compiled and are referenced only from =nrepl.util.io.jvm=).
+
+Bencode's byte primitives do *not* go through the seam (the façade would drop =definline=, maintainer-lens review): =read-byte=, =read-fully!=, =unread-byte!=, =write-byte!=, =write-bytes!=, =utf8-bytes=, =utf8-string= are private =definline=s in =nrepl.bencode= itself using operator-position =#?=: =(#?(:clj .read :cljr .ReadByte) in)=, =(.Read in buf off len)= with 0 at EOF tested as =(and (zero? n) (pos? len))= (an empty netstring =0:= is a legal zero-length read, =L1=), =(.WriteByte out b)= / =(.Write out buf 0 n)= (the 1-arg =Write= compiles against =ReadOnlySpan= and throws at runtime, =E2=), =Encoding/UTF8=. All verified in =L1=.
+
+| Function | Contract | JVM (=nrepl.util.io.jvm=) | CLR (=nrepl.util.io.clr=) |
+|---+---+---+---|
+| =(pushback-input-stream in)= | 1-byte pushback over a buffered byte stream | =(PushbackInputStream. in)= | =(clojure.lang.PushbackInputStream. (BufferedStream. in))=: the =BufferedStream= is load-bearing, a bare =NetworkStream= blocks on the zero-length base read after =Unread= (=E4=) |
+| =byte-array-class= | the dispatch value for =<bytes= (~transport.clj:87~) | =(RT/classForName "[B")= | =|System.Byte[]|= (=classForName "[B"= returns nil silently, =L5=) |
+| =(byte-array? o)= / =(array? o)= | | =(= Byte/TYPE (.getComponentType (class o)))= / =(.isArray (class o))= | =(instance? |System.Byte[]| o)= / =(.IsArray (class o))= |
+| =(byte-sink)= / =(sink->bytes s)= | in-memory byte accumulator for =safe-write-bencode= and the bencode =InputStream= branch | =ByteArrayOutputStream= / =.toByteArray= | =MemoryStream= / =.ToArray= |
+| =(copy! in out)= | | =io/copy= | =(.CopyTo in out)= |
+| =(text-reader x)= / =(text-writer x)= | UTF-8 reader/writer over a byte stream, socket or path object | =io/reader= / =io/writer= | =clojure.clr.io/text-reader= / =text-writer= (already extended to =Stream= and =Socket=, =B15=) |
+| =(pushback-reader r)= / =(pushback-reader? x)= | 1-char pushback for =clojure.edn/read= and the TTY code path | =java.io.PushbackReader= | =clojure.lang.PushbackTextReader= (=B14=) |
+| =(line-numbering-reader r)= / =(line-numbering-reader? x)= | the reader =*in*= and eval source use | =LineNumberingPushbackReader= | =clojure.lang.LineNumberingTextReader= |
+| =(set-line! r n)= / =(set-column! r n)= | source position for =eval= | =.setLineNumber=; private =_columnNumber= via reflection (today) | =(set! (.LineNumber r) (int n))=; =_columnNumber= via =GetField= with =(enum-or NonPublic Instance)= and =SetValue= of =(int n)= (=E6=) |
+| =(reader-ready? r)= | true when a read would not block; used only on the session's =*in*= | =(.ready r)= | =(or (.GetValue has-unread-field r) (not= -1 (.Peek r)))= where the field is =_hasUnread= of =LineNumberingTextReader=: =Peek= bypasses the pushback char, so after =(read)= the delimiter is invisible to it (=E5=, CLR review blocker 3). Never called on a =StreamReader=-backed reader, whose =Peek= blocks (=E9=) |
+| =(string-reader s)= / =(string-writer)= / =(writer->string w)= | | =StringReader= / =StringWriter= / =str= | =System.IO.StringReader= / =StringWriter= / =.ToString= (the callback writer overrides =ToString=) |
+| =(write-string! w s)= / =(flush! w)= / =(close! x)= / =(closeable? x)= | for text writers and byte streams alike | =.write= / =.flush= / =.close= / =(instance? Closeable x)= | =.Write= / =.Flush= / =.Dispose= / =(instance? IDisposable x)= (=B7=) |
+| =(file-name path)= | =short-file-name= (~interruptible_eval.clj:53-55~) | =(.getName (io/file p))= | =(Path/GetFileName p)= |
+| =(stdin-reader need-input-fn)= → reader | the =*in*= source fed by the =stdin= op; satisfies =StdinSink= | =QueuePollingReader= | =nrepl.QueuePollingReader= from =src/csharp= (D5), a line-for-line port of the Java class with =Read()= returning -1 at EOF, bulk =Read= 0 at EOF, non-blocking =Peek= from its queue, and the interrupt re-latch; the proxy below is the verified fallback |
+| protocol =StdinSink=: =(add-input! r s)= / =(add-eof! r)= | | on =QueuePollingReader= | on the C# class (=AddInput= / =AddEof=) |
+| =(replying-writer callback buffer-size quota)= → writer | the writer bound as =*out*= / =*err*=: buffers, hands complete lines (or =buffer-size= units) to =callback=, enforces =quota= | exactly today's chain: =CallbackBufferedOutputStream= → =(OutputStreamWriter. s StandardCharsets/UTF_8)= → =QuotaBoundWriter= → =(PrintWriter. w true)=; returns the =PrintWriter= (sanity_test calls =.println= and =.write= on it) | =nrepl.CallbackBufferedWriter= → =nrepl.QuotaBoundWriter= from =src/csharp= (D5), ports of the Java classes over =TextWriter=; the buffer counts UTF-16 units and keeps a trailing high surrogate (=E3=); the proxy below is the verified fallback |
+| =(print-with-quota writer f)= → truncated? | runs =f=; true when the quota was hit | =(try (f) false (catch QuotaExceeded _ true))=, wrapped around the whole =with-open= so close → flush → callback still precedes the catch (~print.clj:81-84~) | =f= under a catch of =ex-info {:nrepl/kind ::quota-exceeded}=, then also read the proxy's =exceeded?= flag (a user =catch Exception= inside a =print-method= cannot hide the truncation) |
+| =(tee-writer original callback)= | the writer installed by =nrepl.util.out/wrap-standard-streams=: forwards to =original= and feeds complete lines to =callback=; guards against recursive flush as =TeeOutputStream= does | =(PrintStream. (TeeOutputStream. original (CallbackBufferedOutputStream. callback 1024)))= | =nrepl.TeeWriter= from =src/csharp= (D5); the state (=original-print-streams=, =callbacks=, =wrapped?=) stays in =nrepl.util.out= |
+| =(install-system-writers! out err)= / =(system-writers)= | process-wide stdout/stderr replacement and capture | =System/setOut= / =System/setErr=; =System/out= / =System/err= | =Console/SetOut= / =SetError= (wrapped in =SyncTextWriter=, restore means =SetOut= of the saved original, =E8=); ClojureCLR's root =*out*= / =*err*= bypass =Console.Out= and have =AutoFlush false=, so =wrap-standard-streams= also =alter-var-root=s them and the tee flushes itself (=E7=) |
+
+The =src/csharp= classes follow the Java sources line for line with the TextReader/TextWriter contracts from =C1=, =C2=, =E5=, =E9=, =E10= (=Read()= -1 at EOF, bulk =Read= 0 at EOF, non-blocking =Peek=, =WriteLine= as =Write(string)= + newline, =Dispose(bool)= flushing before the enclosing catch). The verified proxy fallback for the stdin reader (=C1=, =E5=, =E9=, CLR review):
+#+begin_src clojure
+(proxy [System.IO.TextReader] []
+  (Peek [] (int (poll-char)))                 ; non-blocking, from the queue; never -1 while data is queued
+  (Read ([] (int (read-char)))               ; -1 at EOF; LineNumberingTextReader only ever calls this and Peek
+        ([buf off len]                        ; one multi-arity clause: proxy dispatches by name, two clauses fail
+         (if (zero? (int len)) (int 0)
+             (let [c (read-char)] (if (neg? c) (int 0) (do (aset-char buf (int off) (char c)) … (int n)))))))
+  (Dispose [disposing] (clear-queue!)))
+#+end_src
+=read-char= takes from a =BlockingCollection<string>= with a private EOF sentinel compared by =identical?=, sends =need-input= when empty, and on =ThreadInterruptedException= re-interrupts the current thread and returns -1, as =QueuePollingReader.java:61-65= does. Every int-returning method returns =(int …)=: a long throws =InvalidCastException=, nil throws =NullReferenceException=. The =Read(Span<char>)= override the proxy generates throws =InvalidProgramException= if called; nothing in nREPL or ClojureCLR calls it.
+
+The verified proxy fallback for the callback writer (=C2=, =E10=, CLR review):
+#+begin_src clojure
+(proxy [System.IO.TextWriter] []
+  (get_Encoding [] System.Text.Encoding/UTF8)
+  (Write ([x] (cond (string? x) (write-str this x)          ; one clause receives Char, String, Char[], Int64, StringBuilder ...
+                    (char? x) (write-char this x)
+                    (instance? |System.Char[]| x) (write-str this (String. ^chars x))
+                    :else (write-str this (str x))))
+         ([a b c] (if (string? a) (write-str this (String/Format a b c))   ; (string format, object, object) shares arity 3
+                      (write-str this (String. ^chars a (int b) (int c))))))
+  (Flush [] …) (Dispose [disposing] (flush!) …) (ToString [] …))
+#+end_src
+Every body runs under =locking= on a private object (the JVM chain is thread-safe; a proxy is not). Never use =proxy-super= for =Write=: it unmaps every =Write= overload for the duration and the base re-dispatch silently drops text (the prior-art writer has this bug). =WriteLine= arrives as =Write(string)= then =Write(newline)=. Measured cost ~15 ns per =Write(char)= for the proxy versus ~4 ns for the C# class (=C3=); the C# class is the decision (D5).
+
+** nrepl.util.out
+Stays the owner of =original-print-streams=, =callbacks= and =wrapped?= (=out_test= reads the private atoms). =wrap-standard-streams= builds the tee through =io/tee-writer= and =io/install-system-writers!=, then =bindRoot= / =alter-var-root= of =*out*=, =*err*= and =clojure.test/*test-out*= as today. =unwrap-standard-streams= is a new public function shipped as its own PR with a CHANGELOG line: restores the captured originals, resets =wrapped?=, keeps callbacks registered, idempotent. =run-stream-callbacks= submits to =handle-executor=.
+
+** nrepl.socket and nrepl.tls: two files, one contract
+No façade. =nrepl/socket.clj= and =nrepl/tls.clj= are untouched; =nrepl/socket.cljr= and =nrepl/tls.cljr= define the same vars. Shared code may call only these:
+| Var | Contract | JVM (today) | CLR |
+|---+---+---+---|
+| =(inet-socket bind port)= → listener | bind ="127.0.0.1"= default stays a literal (=F3=) | =ServerSocket= with =setReuseAddress true= | =TcpListener= on =(IPAddress/TryParse bind (by-ref ^IPAddress a))= or else the first =InterNetwork= address of =Dns/GetHostAddresses= (=::1= comes first otherwise, =B16=); =.Start=; never set =ReuseAddress= (it enables =SO_REUSEPORT= and a second server can hijack the port, =F5=) |
+| =(unix-server-socket path)= / =(unix-client-socket path)= | | =jdk17= / =junixsocket= flavours | =Socket(AddressFamily/Unix, SocketType/Stream, ProtocolType/Unspecified)= + =UnixDomainSocketEndPoint= + =Listen=; the file is deleted on listener =Dispose=; a stale file after a crash blocks =Bind= as on the JDK (=F4=); 108-char path limit |
+| =(accept s)= → connection | blocks; when the listener was closed, throws an exception for which =closed-exception?= is true | protocol =Acceptable=, =ClosedChannelException= | =AcceptSocket=; after =.Stop= the blocked call throws =SocketException(Interrupted)= within ~12 ms and later calls throw =InvalidOperationException= (=F2=); the =.cljr= keeps a =closed?= flag per listener because =TcpListener= has no public one |
+| =(closed-exception? e)= / =(close-listener! s)= / =(listener-closed? s)= / =(local-port s)= | | =ClosedChannelException= / =.close= / =.isClosed= / =.getLocalPort= | flag-based / =.Stop= / flag / =(.Port ^IPEndPoint (.LocalEndpoint l))= (read after =Start= only, =F1=) |
+| =(is-connected? s)= | | =.isConnected= (sticky) | =.Connected= (flips only after a failed I/O, =F6=); the disconnection predicate below carries the load |
+| =(buffered-input s)= / =(buffered-output s)= | the byte streams the transports wrap | today's protocols incl. the NIO =BufferedOutputChannel= | one =(NetworkStream. sock true)= per connection; =buffered-input= = =(BufferedStream. ns)= used by the reader thread only; =buffered-output= = the =NetworkStream= itself (each message is already a =MemoryStream=) |
+| =(write out bytes)= / =(write out bytes off len)= | the transport's final write (protocol =Writable= today; the NIO path is not an =OutputStream=, maintainer-lens review) | unchanged | =(.Write ns buf 0 n)= |
+| =(close-connection! s)= | ends a blocked reader | =.close= | =(.Dispose sock)=: the blocked =Read= throws =IOException(ConnectionAborted)= (=TH4=, =F6=) |
+| =(disconnected-exception msg)= / =(disconnected? e)= | what =rethrow-on-disconnection= throws and what =server.clj:87= catches | =(SocketException. msg)= / =instance?= | =(IOException. msg)= / =IOException= wrapping =SocketException= =ConnectionAborted= or =ConnectionReset=, =EndOfStreamException= (=F6=) |
+| =(as-nrepl-uri-string server scheme)= | the ASCII =nrepl://host:port= / =nrepl+unix:path= text clients parse (~cmdline.clj:636-640~) | =(.toASCIIString (as-nrepl-uri …))= | built by hand: =System.Uri= adds a trailing slash to the host form (=F8=) |
+| =(parse-uri s)= → ={:scheme :host :port}= | =url-connect= (~core.clj:189-239~) | =java.net.URI= | =System.Uri= (parses =nrepl://host:port= and =nrepl+unix:/path=, =F8=) |
+| =tls/ssl-context-or-throw=, =tls/server-socket=, =tls/socket=, =tls/accept=, =(tls/handshake-exception? e)= | | today's JSSE code; =SSLException= | phase 2: every fn throws =ex-info {:nrepl/kind ::tls-unsupported}=; phase 3: =SslStream= over the =NetworkStream=, PEM blocks split by the existing pure scanner then =X509Certificate2/CreateFromPem= with =(System.MemoryExtensions/AsSpan ^String s)= (strings cannot be passed to =ReadOnlySpan= parameters), =CopyWithPrivateKey=, =CertificateChainPolicy {TrustMode CustomRootTrust}=, =ClientCertificateRequired true=, name mismatch ignored like JSSE; =SslProtocols/Tls13= pins work on Linux (=F7=) |
+
+** nrepl.util.reflect
+New seam used by =nrepl.util.completion= and =nrepl.util.lookup=. The compliment-lite string code is made host-neutral first (slice 2), so this seam is the reflection and classpath part only.
+| Function | Contract | JVM | CLR |
+|---+---+---+---|
+| =(resolve-class ns sym)= | class or nil | =(let [v (ns-resolve ns sym)] (when (class? v) v))=; the =catch ClassNotFoundException= is dead on every supported JVM (=B10=) and goes | same |
+| =(class-name c)= / =(simple-name c)= / =(package-name c)= | host spelling (D8): =Outer+Inner=, =List`1= | =.getName= / =.getSimpleName= / =(some-> .getPackage .getName)= | =(str c)= (=.FullName= embeds assembly names for generics, =B6=) / =.Name= / =.Namespace= |
+| =(members c)= → seq of ={:name :kind :static? :declaring-class :member}= | =kind= ∈ =:method :field :constructor=, plus =:property :event= on the CLR; accessor methods flagged =IsSpecialName= are dropped | =.getMethods= / =.getFields= / =.getConstructors= + =Modifier/isStatic= | =GetMethods= / =GetFields= / =GetProperties= / =GetEvents= / =GetConstructors= |
+| =(deftype-field? member c)= | | =IType= assignable + =Field= | same interface |
+| =(cache-key)= | invalidation key for =with-classpath-cache= | hash of the classpath system properties | =(count (.GetAssemblies AppDomain/CurrentDomain))= plus the load-path string (the classpath hash is a constant on the CLR, =L7=) |
+| =(classpath-files)= → relative file names | sources of namespaces and class names | ~completion.clj:94-186~ moved whole, Java collections and =ReentrantLock= included | walk each =CLOJURE_LOAD_PATH= dir for =.clj*=; type names from loaded assemblies guarded against =ReflectionTypeLoadException= |
+| =(all-keywords)= | | =Keyword.table= via reflection (today) | =Keyword._symKeyMap= via =GetField= =(enum-or NonPublic Static)=, =.Values= (a =WeakReference[]= snapshot), drop nil =.Target= (=B11=) |
+| =(resource-path s)= → string or nil | =handle-file-meta='s =io/resource= (~misc.clj:144-155~); var =:file= is load-path-relative on both hosts (=L8=) | =io/resource= | =(some-> (clojure.lang.RT/FindFile s) str)= |
+
+** nrepl.util.runtime
+Host identity, exceptions, compiler bindings, process and environment. Small, one namespace.
+| Function | Contract | JVM | CLR |
+|---+---+---+---|
+| =host= → =:jvm= / =:clr=; =(host-version)= → ={:major n :version-string s}= | the third =:versions= entry in =describe= (D13: key =:java= / =:clr=) | ~middleware.clj:44-47~ | =(.Major Environment/Version)=, =System.Runtime.InteropServices.RuntimeInformation/FrameworkDescription= (needs the namespace, =B5=) |
+| =java-version= | =nrepl.misc/java-version= keeps its name; nil on the CLR, and its two consumers (~middleware.clj:44-47~, ~util/threading.clj:64~) live in seams | today | nil |
+| =(class-name-of e)= | the wire =:ex= / =:root-ex= strings (D6) | =(str (class e))= → ="class java.lang.X"= | =(str (class e))= → ="System.X"= (same expression; tests carry per-host expectations) |
+| =(print-stack-trace e w)= | =misc/log= | =.printStackTrace= with =PrintWriter= | =(.Write w (.ToString e))= (=print-cause-trace= prints "[empty stack trace]" for an unthrown exception, =L2=) |
+| =(load-file-bindings)= → map | the four compiler vars ~load_file.clj:26-29~ binds | =Compiler/METHOD LOCAL_ENV LOOP_LOCALS NEXT_LOCAL_NUM= | =MethodVar=, =NextLocalNumVar=, =LoopLocalsVar= via =(.GetValue (.GetField Compiler "MethodVar" (enum-or BindingFlags/NonPublic BindingFlags/Static)) nil)=, =LocalEnvVar= public (=A7=); used with =with-bindings=, never a bare top-level =push-thread-bindings= |
+| =(can-stop-threads?)= | =describe= aux | JDK ≤ 19 or JVMTI enabled | =(try (ControlledExecution/Run (gen-delegate System.Action [] nil) CancellationToken/None) true (catch PlatformNotSupportedException _ false))= once |
+| =(exit! status)= / =(block-forever!)= / =(on-sigint! f)= / =(delete-on-exit! path)= | the =cmdline= entry's process hooks | =System/exit=, =.join= current thread, =sun.misc.Signal=, =.deleteOnExit= | =Environment/Exit=, =(.Join (Thread/CurrentThread))=, =Console/add_CancelKeyPress= with =gen-delegate ConsoleCancelEventHandler=, =AppDomain.ProcessExit= (=C11=) |
+| =(home-dir)= / =(getenv k)= / =(path-join parent child)= / =(path-exists? p)= / =(parent-dir p)= / =(read-edn-file p)= | ~config.clj~; path values are host objects (=File= on the JVM, so =config-file= and =config-dir= keep their types) | =user.home=, =System/getenv=, =io/file=, =.exists=, =.getParentFile=, =edn/read= over =PushbackReader= | =(Environment/GetFolderPath Environment+SpecialFolder/UserProfile)= (="/root"= even with =HOME= unset; treat ="" = absent, =B5=), =Environment/GetEnvironmentVariable=, =FileInfo= over =Path/Combine=, =.Exists=, =.Directory=, =edn/read= over =clojure.lang.PushbackTextReader= (=L3=) |
+| =(version-string)= | nREPL's own version for =describe= | today's =pom.properties= / =-Dnrepl.version= lookup, unchanged | =(AppContext/GetData "nrepl.version")= or the assembly attribute written by the NuGet packager (phase 3); ="" = until then, which is also what a JVM source checkout reports |
+
+Not seamed on purpose: =Compiler/SOURCE_PATH= and =Compiler/SOURCE= (~interruptible_eval.clj:127-128~) are =#'clojure.core/*file*= and =#'clojure.core/*source-path*= on both hosts (CLR review), so the shared code binds those vars directly; =(str (symbol kw))= replaces =(.sym ^Keyword kw)= (~bencode.clj:318~); =(.ns v)= / =(.sym v)= on vars work on both hosts (=L4=).
+
+* Errors (D6)
+Every error nREPL itself raises is a pure Clojure =ex-info= with a =:nrepl/kind= keyword and a message written for a human; shared code never constructs or catches a host exception class. The kinds: =::disconnected= (the transport lost its peer), =::listener-closed= (accept after =stop-server=), =::eof= (a message ended early), =::quota-exceeded= (print quota), =::tls-unsupported=, =::stopped= (a forced stop), =::invalid-message= (bencode top level is not a map). The host seams are where native exceptions are mapped: =socket/disconnected?=, =socket/closed-exception?=, the bencode EOF constructors, =threading/stop-exception?= and =io/print-with-quota= each recognise their host's exception and rethrow or return the kind. =safe-handle= reports =(ex-message e)= and, when present, =(:nrepl/kind (ex-data e))= as =:ex-kind=.
+
+User exceptions escaping =eval= keep the host's own class name in =:ex= / =:root-ex=, because they are the user's exceptions and =(str (class e))= already gives the host spelling (=B6=); the reply also carries =:ex-kind= (=:eval-error=, =:read-error=, =:print-error=, =:stopped=) so a client never has to parse the name.
+
+* Flows
+** Eval and interrupt
+Lanes are threads. =built= means the cited JVM line does it today; =spec= means the CLR body above. The cards show the session =state= atom (~session.clj:194~) and what the client has received.
+
+#+INCLUDE: "diagrams/sequence.html" export html
+#+BEGIN_EXPORT html
+<div id="interrupt">Diagram did not render: open the browser console.</div>
+<script>
+orgPlanSequence('interrupt', {
+  lanes: [
+    {id: 'client', label: 'Client', sub: 'CIDER / Calva'},
+    {id: 'reader', label: 'Transport reader', sub: 'transport-executor thread'},
+    {id: 'handler', label: 'Handler', sub: 'handle-executor thread'},
+    {id: 'session', label: 'Session thread', sub: 'nREPL-session-<id>'},
+    {id: 'reaper', label: 'Reaper', sub: 'JVM: scheduled pool · CLR: dedicated thread'}
+  ],
+  phases: {
+    eval: {label: '1 · eval', tag: 'built on both hosts'},
+    interrupt: {label: '2 · interrupt', tag: 'cooperative, same on both hosts'},
+    kill: {label: '3 · force stop after 5 s', tag: 'JVM: Thread.stop / JVMTI · CLR: Interrupt + ControlledExecution'}
+  },
+  stores: [{id: 'state', label: 'session state atom'}, {id: 'thread', label: 'session thread'}, {id: 'client', label: 'client has received'}],
+  init: {state: ':running nil\n:queue empty\n:thread T1', thread: 'T1 blocked in take!', client: 'nothing'},
+  startLabel: 'Idle session',
+  steps: [
+    {ph: 'eval', from: 'client', to: 'reader', tag: 'built', label: '{op eval, id 7, code "(loop [] (recur))"}',
+     note: 'transport.clj:57-67: the reader thread loops on transport-read and hands each message to a rendezvous queue.'},
+    {ph: 'eval', from: 'reader', to: 'handler', tag: 'built', label: 'handle: recv → run-with handle-executor (handle* msg)',
+     note: 'server.clj:39-48. One pool thread per message, so an interrupt can be handled while the eval runs.'},
+    {ph: 'eval', from: 'handler', to: 'session', tag: 'built', label: 'session mw → interruptible-eval → (:exec) puts [7 evaluator ack msg] on the queue',
+     note: 'session.clj:258-266, interruptible_eval.clj:200-203. *msg* is conveyed explicitly.',
+     state: {state: ':running nil\n:queue [7 …]\n:thread T1'}},
+    {ph: 'eval', from: 'session', to: 'session', tag: 'built', label: 'take! → :running 7 → push-thread-bindings → run-interruptible T1 (evaluator)|CLR: ControlledExecution.Run with token K7 in T1\'s cts-slot',
+     note: 'session.clj:198-208. JVM: run-interruptible expands to the body. CLR: TH6.',
+     state: {state: ':running 7\n:queue empty\n:thread T1', thread: 'T1 spinning in user loop'}},
+    {ph: 'interrupt', from: 'client', to: 'reader', tag: 'built', label: '{op interrupt, interrupt-id 7}'},
+    {ph: 'interrupt', from: 'reader', to: 'handler', tag: 'built', label: 'handle* on another pool thread'},
+    {ph: 'interrupt', from: 'handler', to: 'handler', tag: 'built', label: '(:interrupt 7): CAS :running 7 → nil',
+     note: 'session.clj:239-252. Losing the CAS means the eval finished first: reply :interrupt-id-mismatch / :session-idle.',
+     state: {state: ':running nil\n:queue empty\n:thread T1'}},
+    {ph: 'interrupt', from: 'handler', to: 'session', tag: 'built', label: 'interrupt-stop T1 5000: .interrupt (JVM) / .Interrupt (CLR)',
+     note: 'util/threading.clj:78-91. Wakes a thread blocked in sleep, wait or a queue take (TH1); a spinning thread does not notice (TH2).'},
+    {ph: 'interrupt', from: 'handler', to: 'reaper', tag: 'built', label: 'schedule-once! 5000 ms: kill T1 if still alive',
+     note: 'JVM: the impl\'s private scheduled pool. CLR: a dedicated background thread that sleeps (a Timer can be collected or park a pool thread).'},
+    {ph: 'interrupt', from: 'handler', to: 'handler', tag: 'built', label: 'reset-state: new queue, new thread T2 (published, then started)',
+     note: 'session.clj:229-235. start-session-thread! runs after the reset! (dry-run race). T1 is abandoned.',
+     state: {state: ':running nil\n:queue empty (new)\n:thread T2', thread: 'T1 still spinning; T2 blocked in take!'}},
+    {ph: 'interrupt', from: 'handler', to: 'client', tag: 'built', label: '{status [interrupted done], id 7} then {status [done]} for the interrupt op',
+     note: 'session.clj:292-296. The client considers eval 7 finished now, before T1 is dead.',
+     state: {client: 'interrupted + done for 7'}},
+    {ph: 'kill', from: 'reaper', to: 'session', tag: 'built', label: 'JVM: T1 alive → try-stop-thread (Thread.stop or JVMTI)',
+     note: 'util/threading.clj:62-74 and 86-91. JDK 20+ without the agent: logs "Cannot stop thread" and T1 stays a zombie.'},
+    {ph: 'kill', from: 'reaper', to: 'session', tag: 'spec', label: 'CLR: T1 alive → .Interrupt again, then (.Cancel K7): abort at T1\'s next safe point',
+     note: 'Interrupt first because Cancel cannot reach a thread inside a wait (TH7); the loop back-edge is a safe point, 16–18 ms (TH6). Cancel blocks the reaper until delivery.'},
+    {ph: 'kill', from: 'session', to: 'session', tag: 'built', label: 'T1 unwinds: caught sees stop-exception? → no :eval-error; finally flushes and pops bindings; run-interruptible swallows the Run exception; CAS fails → loop exits',
+     note: 'interruptible_eval.clj:117-124, 169-179; session.clj:218-223. JVM: ThreadDeath. CLR: ThreadAbortException in the body, OperationCanceledException out of Run (TH6).',
+     state: {thread: 'T1 dead, stack reclaimed; T2 serving'}}
+  ]
+});
+</script>
+#+END_EXPORT
+
+** Transport reader loop (rewritten in slice 4)
+Today's loop (~transport.clj:57-67~) ends itself by interrupting its own thread, and its =InterruptedException= branch "works" only because =SynchronousQueue.put(nil)= throws (maintainer-lens review). The seam version, identical in behaviour on the JVM:
+#+begin_src clojure
+(let [read-queue (threading/make-rendezvous)
+      stop       (volatile! false)
+      fut (threading/run-with @threading/transport-executor
+            (while (not (or @stop (threading/cancelled?)))
+              (try (threading/put! read-queue (transport-read))
+                   (catch #?(:clj InterruptedException :cljr System.Threading.ThreadInterruptedException) _
+                     (vreset! stop true))
+                   (catch Exception t
+                     (vreset! stop true)
+                     (threading/put! read-queue t)))))]
+  …)
+#+end_src
+=close= disposes the socket first (that is what ends a blocked =transport-read=, =TH4=) and then =cancel!=s the handle, as today.
+
+* Inline sites in shared files
+Everything a =.cljc= file still does with =#?=, listed so the implementer can grep. "both" means the same expression works on both hosts and the JVM code changes to it (behaviour-neutral).
+| File | Site | Disposition |
+|---+---+---|
+| every shared file | =(:require [clojure.java.io …])= | removed; the seams absorb every =io/= call (slice 5/7 acceptance: no =clojure.java.io= require in a =.cljc=) |
+| =misc.clj:17,28=; =transport.clj:65,73,115=; =server.clj:28,69=; =ack.clj:49=; =interruptible_eval.clj:134,159,161,169= | =Throwable= (15 sites in shared files) | =#?(:clj Throwable :cljr Exception)= each; the JVM keeps =Throwable= because =QuotaExceeded= and =ThreadDeath= are =Error=s |
+| =misc.clj:42= | =java.util.UUID/randomUUID= | =#?(:clj (str (java.util.UUID/randomUUID)) :cljr (str (System.Guid/NewGuid)))= (=random-uuid= is 1.11) |
+| =misc.clj:21= | =.printStackTrace= | =runtime/print-stack-trace= |
+| =misc.clj:92-98=, =session.clj:131,212=, =load_file.clj:26-29= | =Compiler/LOADER=, =with-session-classloader=, context classloader | =#?(:clj …)= only; the CLR expansion is =(do ~@body)= / the key is absent |
+| =misc.clj:103-109,125=, =middleware.clj:44-47=, =config.clj:20=, =version.clj:29= | =System/getProperty= | =runtime= seam (=java-version= nil on the CLR; =version-string=; =home-dir=) |
+| =misc.clj:105,108=, =cmdline.clj:471=, =version.clj:46= | =Integer/parseInt= | =nrepl.misc/parse-int= = =#?(:clj (Integer/parseInt s) :cljr (Int32/Parse s))= (=parse-long= is 1.11) |
+| =misc.clj:152= | =io/resource= | =reflect/resource-path= |
+| =misc.clj:161-168= | =(update :macro str)= etc. | explicit boolean coercion =(if (boolean? v) (if v "true" "false") (str v))= (slice 1; =(str true)= is ="True"= on the CLR) |
+| =middleware.clj:67= | =:java= versions key | =#?(:clj :java :cljr :clr)= (D13) |
+| =bencode.clj:83,106,162,253,302= | =EOFException= / =IOException= / =IllegalArgumentException= constructors | =(new #?(:clj EOFException :cljr System.IO.EndOfStreamException) msg)= etc. |
+| =bencode.clj:94,99,116,187,196,263,275,308,321,368= | =^InputStream= / =^PushbackInputStream= / =^OutputStream= hints | =^#?(:clj InputStream :cljr System.IO.Stream)= etc.; =(.count ^IPersistentMap m)= → =^clojure.lang.Counted= (reflective on the CLR otherwise, =L1=) |
+| =bencode.clj:318= | =(.sym ^Keyword named)= | =(str (symbol named))= (both; Clojure 1.10 =symbol= accepts keywords) |
+| =bencode.clj:335= | =Arrays/sort= | =#?(:clj (Arrays/sort arr cmp) :cljr (System.Array/Sort arr cmp))= (a fn is an =IComparer=, =L1=) |
+| =bencode.clj:351,366= | =extend-protocol= types =InputStream=, =Number= | =#?(:clj InputStream :cljr System.IO.Stream)=; =#?@(:clj [Number …])= and an =(integer? o)= branch under =#?(:cljr …)= in the =Object= fallback (=extend-protocol= cannot target =Int32= / =Byte= on the CLR, =B13=; =System.Numerics.BigInteger= is not =integer?=) |
+| =bencode.clj:395-400= | =Byte/TYPE=, =.getComponentType=, =.isArray= | =io/byte-array?=, =io/array?= |
+| =transport.clj:47=, =core.clj:17= | =Long/MAX_VALUE= | =threading/infinite-ms= |
+| =transport.clj:49-50=, =server.clj:172-173= | =java.io.Closeable= on =FnTransport= / =Server= | =#?@(:clj [java.io.Closeable (close [_] …)] :cljr [System.IDisposable (Dispose [_] …)])= (=B7=) |
+| =transport.clj:62,67= | =InterruptedException=, self-interrupt | the reader loop above |
+| =transport.clj:87-89= | =<bytes= byte-array method | =(defmethod <bytes io/byte-array-class [input] (io/utf8-string input))= |
+| =transport.clj:101-119= | =rethrow-on-disconnection= | slice 3 predicate: =socket/closed-exception?=, any =EOFException= from bencode (=#?(:clj EOFException :cljr System.IO.EndOfStreamException)=), the ="EOF while reading"= message from =clojure.edn= (same text on both hosts; =EndOfStreamException= on the CLR, =L5=), =socket/disconnected?=, and =(not (socket/is-connected? s))=; throws =socket/disconnected-exception= with today's message |
+| =transport.clj:181-212= | =tty=: =Semaphore=, =.write= / =.flush= on the writer, =LineNumberingPushbackReader= | =:clj=-only (=#?@(:clj [...])= around =tty= and =tty-greeting=); the verification matrix never runs =cmdline_tty= on the CLR |
+| =transport.clj:279= | =.getMessage= in =safe-handle= | =ex-message= (slice 1; on the CLR the error path currently throws =MissingMethodException= and the client gets nothing, =L8=) |
+| =server.clj:54= | =(catch java.io.IOException …)= | =(catch #?(:clj java.io.IOException :cljr System.IO.IOException) e …)= |
+| =server.clj:63,67= | =SSLException=, =ClosedChannelException= catches | =(tls/handshake-exception? e)=, =(socket/closed-exception? e)= predicates inside one catch |
+| =server.clj:87= | =(catch SocketException _)= | =(socket/disconnected? e)= |
+| =server.clj:101= | =(instance? java.io.Closeable t)= | dropped (the comment says it is always true) |
+| =core.clj:87,147,187,238= | =IllegalStateException= / =IllegalArgumentException= constructors | =(new #?(:clj IllegalStateException :cljr InvalidOperationException) …)=, =ArgumentException= |
+| =core.clj:164-187= | =java.net.Socket=, unix client | =socket/connect=, =socket/unix-client-socket= |
+| =core.clj:189-239= | =java.net.URI= parsing in =url-connect= | =(socket/parse-uri s)= → ={:scheme :host :port}= on both files (=System.Uri= parses =nrepl://host:port=, =F8=) |
+| =session.clj:91= | =*compile-path*= default | =#?(:clj (System/getProperty "clojure.compile.path" "classes") :cljr (or (runtime/getenv "CLOJURE_COMPILE_PATH") "."))= |
+| =session.clj:152-159,205-207= | =^Runnable= hints, =.run= | keep the =Runnable= branch under =#?(:clj …)=: =(if (fn? r) (r) #?(:clj (.run ^Runnable r)))=; never =#()= inside =session-loop=, which is itself a =#()= literal |
+| =session.clj:223= | =(catch InterruptedException _)= | =(catch #?(:clj InterruptedException :cljr System.Threading.ThreadInterruptedException) _)= |
+| =interruptible_eval.clj:16-17,50,135= | =Compiler$CompilerException=, =LispReader$ReaderException= | =#?(:clj Compiler$CompilerException :cljr Compiler+CompilerException)=, =LispReader+ReaderException= |
+| =interruptible_eval.clj:103,193= | =(instance? PushbackReader code)= | =io/pushback-reader?= |
+| =interruptible_eval.clj:112-116= | =Iterable= / =.iterator= | =(seqable? code)= with a =volatile!= over =(seq code)= (both) |
+| =interruptible_eval.clj:127-128= | =Compiler/SOURCE_PATH=, =SOURCE= | =#'clojure.core/*file*=, =#'clojure.core/*source-path*= (both) |
+| =interruptible_eval.clj:148= | =(Compiler/eval input true)= | =#?(:clj (Compiler/eval input true) :cljr (Compiler/eval input))= (=A6=) |
+| =interruptible_eval.clj:154-155= | =(.flush ^Writer *err*)= | =io/flush!= |
+| =print.clj:77-79,93-96= | =RT/iter= + =.hasNext= | =loop= / =recur= over =(seq keys)= (both; =RT/iter= returns an =IEnumerator= on the CLR) |
+| =print.clj:103=, =sanity_test= | =(str writer)= | =io/writer->string= |
+| =completion.clj= | see slice 2 and the reflect seam; the file is the vendored compliment-lite copy, edited freely | string helpers shim at the top of the file: =starts-with?= etc. are culture-sensitive on ClojureCLR too (=B9=), so the CLR branch uses =StringComparison/Ordinal=; =(Character/isUpperCase c)= → =#?(:clj … :cljr (Char/IsUpper c))=; =^Character= hint dropped; =.length= / =.charAt= → =count= / =nth= or =#?=; unmatched optional regex groups are ="" = on the CLR, =nil= on the JVM (=L7=): =(not-empty …)= at =var-symbol?= and =split-by-leading-literals=; =Iterable= loop → =seq=; =(sort-by :candidate …)= → ordinal comparator on the CLR |
+| =config.clj:53,60,72= | =^java.io.File= hints | =runtime= path functions return host objects; hints become =^#?(:clj java.io.File :cljr System.IO.FileInfo)= |
+| =load_file.clj:26-29= | compiler vars | =(runtime/load-file-bindings)= |
+| =cmdline.clj:20,431= | =FileNotFoundException= | in =nrepl.cmdline.options= (=.cljc=): =#?(:clj java.io.FileNotFoundException :cljr System.IO.FileNotFoundException)= |
+
+* What stays JVM-only
+=nrepl.util.jvmti=, =nrepl.util.classloader= (its =require= leaves =session.clj= and =util/threading.clj=; the impl namespace requires it), =nrepl.socket= + =nrepl.socket.*= and =nrepl.tls= as files (the CLR has siblings), =nrepl.cmdline= (interactive client; the CLR has a sibling entry), =nrepl.tls-client-proxy= (until phase 3), =JvmtiAgent.java=, =libnrepl/=, =res/*.so=, =build/= and the Clojars deploy, =transport/tty=.

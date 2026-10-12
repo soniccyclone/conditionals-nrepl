@@ -1,0 +1,4 @@
+{:cljc {:features [:cljs]}
+ :linters {:unresolved-namespace {:exclude [Environment System.Environment
+                                            System.IO.Path System.IO.File
+                                            System.Threading.Thread]}}}
