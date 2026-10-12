@@ -261,4 +261,3 @@ workflows:
           <<: *run_always
       - lint:
           <<: *run_always
-      # The deploy job was removed on this fork: nothing is released from here.

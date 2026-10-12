@@ -1,7 +1,3 @@
-;; Config overlay for `make kondo-clr`: lint the :cljr branches of .cljc files
-;; by reading them as :cljs. Add System.* namespaces here as the CLR branches use
-;; them; kondo prints the exact spelling it wants in its "Unresolved namespace"
-;; warning.
 {:cljc {:features [:cljs]}
  :linters {:unresolved-namespace {:exclude [Environment System.Environment
                                             System.IO.Path System.IO.File
