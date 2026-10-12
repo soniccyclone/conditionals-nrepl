@@ -1,4 +1,4 @@
-.PHONY: test eastwood cljfmt kondo cloverage install deploy clean lint javac javac-test docs verify-docs verify-cljdoc check-env
+.PHONY: test eastwood cljfmt kondo kondo-clr cloverage install deploy clean lint javac javac-test docs verify-docs verify-cljdoc check-env
 .DEFAULT_GOAL := install
 
 # Set bash instead of sh for the @if [[ conditions,
@@ -26,6 +26,18 @@ cljfmt:
 
 kondo:
 	clojure -M:kondo
+
+# Advisory lint of the ClojureCLR branches. clj-kondo has no :cljr language
+# (configuring it as a feature makes kondo fail with "No matching clause:
+# :cljr"), so this lints a scratch copy of src with :cljr rewritten to :cljs.
+# Expect some noise from System.* interop; extend .clj-kondo/clr.edn as needed.
+# Not part of `make lint`.
+KONDO_CLR_DIR := $(or $(TMPDIR),/tmp)/nrepl-kondo-clr
+kondo-clr:
+	rm -rf $(KONDO_CLR_DIR) && mkdir -p $(KONDO_CLR_DIR)
+	cp -r src $(KONDO_CLR_DIR)/src
+	find $(KONDO_CLR_DIR)/src -name '*.cljc' -exec sed -i 's/:cljr\b/:cljs/g' {} +
+	clojure -M:kondo-clr --lint $(KONDO_CLR_DIR)/src --config-dir .clj-kondo --config "$$(cat .clj-kondo/clr.edn)"
 
 cloverage:
 	clojure -M:cloverage

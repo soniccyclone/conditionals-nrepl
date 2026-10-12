@@ -43,6 +43,11 @@
   :kondo {:extra-deps {clj-kondo/clj-kondo {:mvn/version "2026.05.25"}}
           :main-opts ["-m" "clj-kondo.main" "--lint" "src"]}
 
+  ;; Same linter without a fixed --lint path; used by `make kondo-clr` to lint a
+  ;; rewritten copy of the sources (see the Makefile target).
+  :kondo-clr {:extra-deps {clj-kondo/clj-kondo {:mvn/version "2026.05.25"}}
+              :main-opts ["-m" "clj-kondo.main"]}
+
   :eastwood {:extra-deps {jonase/eastwood {:mvn/version "1.4.3"}}
              :main-opts ["-m" "eastwood.lint"
                          {:config-files ["eastwood.clj"]
