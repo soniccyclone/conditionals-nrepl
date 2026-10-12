@@ -591,7 +591,7 @@
   ;; transport's own "lost its connection" message.
   (let [^Throwable cause (root-cause e)]
     (and (instance? SocketException cause)
-         (re-find #"(?i)(lost.*connection|socket closed|connection reset)" (.getMessage cause)))))
+         (re-find #"(?i)(lost.*connection|socket closed|connection reset)" (ex-message cause)))))
 
 (deftest transports-fail-on-disconnects
   (testing "Ensure that transports fail ASAP when the server they're connected to goes down."
@@ -889,7 +889,7 @@
 (defn custom-session-repl-caught
   [^Throwable t]
   (binding [*out* *err*]
-    (println "bar" (.getMessage t))))
+    (println "bar" (ex-message t))))
 
 (def-repl-test session-caught-options
   (testing "setting *caught-fn* works"

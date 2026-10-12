@@ -3,7 +3,8 @@
   at build time."
   {:author "Colin Jones"
    :added  "0.5"}
-  (:require [clojure.java.io :as io])
+  (:require [clojure.java.io :as io]
+            [nrepl.misc :as misc])
   (:import java.util.Properties))
 
 (def ^:private group "nrepl")
@@ -41,6 +42,6 @@
   (assoc (->> version-string
               (re-find #"(\d+)\.(\d+)\.(\d+)-?(.*)")
               rest
-              (map #(try (Integer/parseInt %) (catch Exception _e nil)))
+              (map #(try (misc/parse-int %) (catch Exception _e nil)))
               (zipmap [:major :minor :incremental :qualifier]))
          :version-string version-string))

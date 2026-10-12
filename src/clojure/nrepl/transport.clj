@@ -105,11 +105,11 @@
      (catch ClosedChannelException e#
        (throw (SocketException. "The transport's socket appears to have lost its connection to the nREPL server")))
      (catch RuntimeException e#
-       (if (= "EOF while reading" (.getMessage e#))
+       (if (= "EOF while reading" (ex-message e#))
          (throw (SocketException. "The transport's socket appears to have lost its connection to the nREPL server"))
          (throw e#)))
      (catch EOFException e#
-       (if (= "Invalid netstring. Unexpected end of input." (.getMessage e#))
+       (if (= "Invalid netstring. Unexpected end of input." (ex-message e#))
          (throw (SocketException. "The transport's socket appears to have lost its connection to the nREPL server"))
          (throw e#)))
      (catch Throwable e#
@@ -279,5 +279,5 @@
                                   (catch Exception e#
                                     (respond-to ~msg-sym
                                                 :status #{~(keyword (str op "-error")) :error :done}
-                                                :message (.getMessage e#))))]))
+                                                :message (ex-message e#))))]))
                        (partition 2 body))))))

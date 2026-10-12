@@ -97,15 +97,19 @@
      (with-bindings {clojure.lang.Compiler/LOADER cl#}
        ~@body)))
 
+(defn parse-int
+  [s]
+  (Integer/parseInt s))
+
 (defn parse-java-version
   "Parse Java version string according to JEP 223 and return version as a number."
   []
   (try (let [s (System/getProperty "java.specification.version")
              [major minor _] (str/split s #"\.")
-             major (Integer/parseInt major)]
+             major (parse-int major)]
          (if (> major 1)
            major
-           (Integer/parseInt minor)))
+           (parse-int minor)))
        (catch Exception _ 8)))
 
 (def java-version "Current Java version number." (parse-java-version))
@@ -154,6 +158,12 @@
            ;; and convert it to string
            value))))
 
+(defn ->wire-string
+  [v]
+  (if (boolean? v)
+    (if v "true" "false")
+    (str v)))
+
 (defn sanitize-meta
   "Sanitize a Clojure metadata map such that it can be bencoded."
   [m]
@@ -163,8 +173,8 @@
       (update :name str)
       (update :protocol str)
       (update :file handle-file-meta)
-      (cond-> (:deprecated m) (update :deprecated str))
-      (cond-> (:macro m) (update :macro str))
-      (cond-> (:special-form m) (update :special-form str))
+      (cond-> (:deprecated m) (update :deprecated ->wire-string))
+      (cond-> (:macro m) (update :macro ->wire-string))
+      (cond-> (:special-form m) (update :special-form ->wire-string))
       (assoc :arglists-str (str (:arglists m)))
       (cond-> (:arglists m) (update :arglists str))))

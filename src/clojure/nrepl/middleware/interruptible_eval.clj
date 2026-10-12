@@ -48,7 +48,7 @@
   [^Throwable e]
   (or (instance? ThreadDeath (clojure.main/root-cause e))
       (and (instance? Compiler$CompilerException e)
-           (instance? ThreadDeath (.getCause e)))))
+           (instance? ThreadDeath (ex-cause e)))))
 
 (defn- short-file-name [source-path]
   (try (.getName (io/file source-path))

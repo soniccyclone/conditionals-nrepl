@@ -53,7 +53,7 @@
       (bencode/write-bencode out thing)
       (.toString out)
       (catch IllegalArgumentException ex
-        (throw (ex-info (.getMessage ex) {:thing thing}))))))
+        (throw (ex-info (ex-message ex) {:thing thing}))))))
 
 (defn- lookup-public-vars
   "Look up every public var in all namespaces in the classpath and return the result as a set."

@@ -274,7 +274,7 @@
       (ssl-str-context (slurp tls-keys-file))
       (catch Exception e
         (throw (ex-info (str "Could not create TLS context from file " tls-keys-file
-                             ". Error message: " (.getMessage e))
+                             ". Error message: " (ex-message e))
                         {:nrepl/kind :nrepl.server/invalid-start-request}
                         e))))
 
@@ -283,7 +283,7 @@
       (ssl-str-context tls-keys-str)
       (catch Exception e
         (throw (ex-info (str "Could not create TLS context from string. "
-                             "Error message: " (.getMessage e))
+                             "Error message: " (ex-message e))
                         {:nrepl/kind :nrepl.server/invalid-start-request}
                         e))))
 

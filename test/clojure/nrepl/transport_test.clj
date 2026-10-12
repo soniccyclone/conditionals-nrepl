@@ -29,3 +29,15 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo
                             #"^nREPL message must be a map."
                             (sut/recv (sut/bencode in out)))))))
+
+(deftest safe-handle-error-reply-test
+  (testing "a handler throwing ex-info is answered with its ex-message and an -error status"
+    (let [sent (atom [])
+          transport (sut/->FnTransport (fn [_timeout]) #(swap! sent conj %) (fn []))
+          e (ex-info "boom" {:cause :test})]
+      (sut/safe-handle {:op "explode" :id "1" :transport transport}
+        "explode" (fn [_msg] (throw e)))
+      (is (= [{:id "1"
+               :status #{:explode-error :error :done}
+               :message (ex-message e)}]
+             @sent)))))

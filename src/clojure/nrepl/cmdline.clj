@@ -9,7 +9,7 @@
    [clojure.string :as str]
    [nrepl.config :as config]
    [nrepl.core :as nrepl]
-   [nrepl.misc :refer [uuid]]
+   [nrepl.misc :refer [parse-int uuid]]
    [nrepl.server :as nrepl-server]
    [nrepl.socket :as socket]
    [nrepl.transport :as transport]
@@ -229,10 +229,10 @@ Exit:      Control+D or (exit) or (quit)"
       (catch FileNotFoundException e
         ;; drawbridge pulls in clj-http and cheshire, which fail the same way,
         ;; so don't blame drawbridge for one of its dependencies.
-        (if (str/includes? (str (.getMessage e)) "drawbridge")
+        (if (str/includes? (str (ex-message e)) "drawbridge")
           (die (format "nREPL: connecting to %s URLs requires the nrepl/drawbridge library on the classpath.\n"
                        scheme))
-          (die (format "nREPL: couldn't load drawbridge.client: %s\n" (.getMessage e))))))))
+          (die (format "nREPL: couldn't load drawbridge.client: %s\n" (ex-message e))))))))
 
 (def ^:private unix-url-transports
   "Transports keyed by the scheme a filesystem-socket server advertises. Those
@@ -283,7 +283,7 @@ Exit:      Control+D or (exit) or (quit)"
   (let [^java.net.URI uri (try
                             (java.net.URI. ^String url)
                             (catch java.net.URISyntaxException e
-                              (die (format "nREPL: Invalid URL %s (%s).\n" url (.getMessage e)))))
+                              (die (format "nREPL: Invalid URL %s (%s).\n" url (ex-message e)))))
         host (.getHost uri)
         port (.getPort uri)]
     (when-not host
@@ -324,9 +324,9 @@ Exit:      Control+D or (exit) or (quit)"
             (try
               (nrepl/url-connect host)
               (catch java.net.URISyntaxException e
-                (die (format "nREPL: Invalid URL %s (%s).\n" host (.getMessage e))))
+                (die (format "nREPL: Invalid URL %s (%s).\n" host (ex-message e))))
               (catch IllegalArgumentException e
-                (die (format "nREPL: %s\n" (.getMessage e))))))
+                (die (format "nREPL: %s\n" (ex-message e))))))
 
         socket
         (nrepl/connect :socket socket :transport-fn transport)
@@ -468,7 +468,7 @@ Exit:      Control+D or (exit) or (quit)"
   (cond
     (nil? x) x
     (number? x) x
-    :else (Integer/parseInt x)))
+    :else (parse-int x)))
 
 (defn- sanitize-middleware-option
   "Sanitize the middleware option.  In the config it can be either a
@@ -700,6 +700,6 @@ Exit:      Control+D or (exit) or (quit)"
            :nrepl.server/invalid-start-request)
           (do
             (binding [*out* *err*]
-              (println (.getMessage ex)))
+              (println (ex-message ex)))
             (clean-up-and-exit 2))
           (throw ex))))))
