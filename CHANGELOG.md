@@ -9,6 +9,7 @@
 ### Bugs fixed
 
 - Non-ASCII `:out` chunks were mangled on JVMs with a non-UTF-8 default charset.
+- A bencode message cut short inside a netstring ("Less data available than expected") now reports a lost connection instead of a raw `EOFException`.
 
 ## 1.8.0 (2026-10-02)
 

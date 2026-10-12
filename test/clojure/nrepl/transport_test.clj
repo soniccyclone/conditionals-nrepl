@@ -67,6 +67,11 @@
       (is (socket/disconnected? e))
       (is (re-find #"lost its connection" (ex-message e)))))
 
+  (testing "bencode input that ends inside a netstring is reported as a lost connection"
+    (let [e (recv-error sut/bencode "d3:foo3:ba")]
+      (is (socket/disconnected? e))
+      (is (re-find #"lost its connection" (ex-message e)))))
+
   (testing "EDN input that ends mid-form is reported as a lost connection"
     (let [e (recv-error sut/edn "{:op ")]
       (is (socket/disconnected? e))
@@ -82,6 +87,15 @@
     (let [e (recv-error sut/bencode (failing-input-stream (IOException. "boom")) (Socket.))]
       (is (socket/disconnected? e))
       (is (re-find #"lost its connection" (ex-message e)))))
+
+  (testing "a RuntimeException is a lost connection when the socket is not connected"
+    (let [e (recv-error sut/bencode (failing-input-stream (RuntimeException. "boom")) (Socket.))]
+      (is (socket/disconnected? e))
+      (is (re-find #"lost its connection" (ex-message e)))))
+
+  (testing "a RuntimeException is rethrown unchanged when there is no socket to blame"
+    (let [cause (RuntimeException. "boom")]
+      (is (identical? cause (recv-error sut/bencode (failing-input-stream cause))))))
 
   (testing "another read failure is rethrown unchanged when the socket is still connected"
     (let [cause (IOException. "boom")]

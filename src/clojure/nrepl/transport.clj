@@ -103,8 +103,8 @@
      (catch Throwable e#
        (if (cond
              (socket/closed-exception? e#) true
-             (instance? RuntimeException e#) (= "EOF while reading" (ex-message e#))
-             (instance? EOFException e#) (= "Invalid netstring. Unexpected end of input." (ex-message e#))
+             (instance? EOFException e#) true
+             (= "EOF while reading" (ex-message e#)) true
              :else (let [s# ~s]
                      (and (satisfies? socket/Connectable s#) (not (socket/is-connected? s#)))))
          (throw (socket/disconnected-exception "The transport's socket appears to have lost its connection to the nREPL server"))
