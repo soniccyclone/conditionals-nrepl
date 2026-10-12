@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: codespell-project/actions-codespell@v2
         with:
-          skip: ./test/*.txt
+          skip: ./test/*.txt,./plan/verify/results.org
           ignore_words_file: codespell.txt
   misspell:
     name: Check spelling with misspell
