@@ -2,7 +2,7 @@
 #+OPTIONS: ^:nil toc:2 num:nil
 #+DATE: 2026-10-11
 
-Generated from the verification workflow journal (one agent per batch, two independent skeptics per thread claim and per refuted or plan-changing claim). Evidence is trimmed; the full experiment files are under the batch's experiment directory in the session scratchpad and can be rerun with the commands recorded there. Status: =upheld= both skeptics agreed with the original verdict, =overturned= both disagreed and agreed with each other, =disputed= the skeptics split (adjudicated by hand in 02-facts), =unrefuted= no skeptic was assigned.
+Generated from the verification workflow journal. The skeptic pass was cut short by a session limit: 73 of the planned refutation runs and the completeness critic never ran, so =unrefuted= rows had no skeptic assigned or lost theirs to the limit. (one agent per batch, two independent skeptics per thread claim and per refuted or plan-changing claim). Evidence is trimmed; the full experiment files are under the batch's experiment directory in the session scratchpad and can be rerun with the commands recorded there. Status: =upheld= both skeptics agreed with the original verdict, =overturned= both disagreed and agreed with each other, =disputed= the skeptics split (adjudicated by hand in 02-facts), =unrefuted= no skeptic was assigned.
 Totals so far: CONFIRMED 67, DISPUTED 5, PARTIAL 35, REFUTED 2; batches done 16/16; refutation votes 106.
 
 * Batch A
