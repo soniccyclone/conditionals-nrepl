@@ -20,8 +20,8 @@ CI facts: CircleCI runs Clojure 1.12 on JDK 17/21/25/26, 1.12 + junixsocket on J
 
 * Phase 0. Fork hygiene (0.5 d)
 - DONE Baseline recorded on 2026-10-11 in a JDK 21 container: 178 tests, 0 failures; lint clean (=plan/verify/Containerfile.jvm=, =-e CLOJURE_VERSION=1.12= or the image's =ENV=).
-- TODO Neutralize upstream-pointing automation in the fork: delete =.github/workflows/docs-dispatch.yml= and =.github/workflows/github-release.yml=; make the CircleCI =deploy= job unreachable. Keep =spell_checking.yml= and =libnrepl.yml=.
-- TODO =.clj-kondo/config.edn=: add =:cljc {:features [:clj]}= now (kondo has no =:cljr= language: =[:clj :cljr]= crashes it with "No matching clause: :cljr", and the default =[:clj :cljs]= makes every seam façade fail with "Invalid require: no libs specified to load", =J5=, dry run). =.cljfmt.edn=: add =:file-pattern #re "\\.clj[csrx]?$"= so =.cljr= files are formatted (=J6=).
+- DONE Removed the fork's release automation on branch =clr-port=: =.github/workflows/docs-dispatch.yml=, =.github/workflows/github-release.yml= and the CircleCI =deploy= job. =spell_checking.yml= and =libnrepl.yml= stay.
+- DONE =.clj-kondo/config.edn=: =:cljc {:features [:clj]}= added on =clr-port= (kondo has no =:cljr= language: =[:clj :cljr]= crashes it with "No matching clause: :cljr", and the default =[:clj :cljs]= makes every seam façade fail with "Invalid require: no libs specified to load", =J5=, dry run). =.cljfmt.edn=: add =:file-pattern #re "\\.clj[csrx]?$"= so =.cljr= files are formatted (=J6=).
 
 * Phase 1. JVM refactors (8 d)
 Every slice: no behaviour change on the JVM unless called out, suite green, lint green, a CHANGELOG line where behaviour changes.

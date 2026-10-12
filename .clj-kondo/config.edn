@@ -1,4 +1,7 @@
 {:output            {:progress true}
+ ;; clj-kondo has no :cljr language: [:clj :cljr] crashes it and the default
+ ;; [:clj :cljs] pass misreads #?(:clj .. :cljr ..) forms. Lint JVM branches only.
+ :cljc              {:features [:clj]}
  :config-in-comment {:linters {:unused-value         {:level :off}
                                :unresolved-namespace {:level :off}}}
  :linters           {:unused-private-var {:level   :warning}

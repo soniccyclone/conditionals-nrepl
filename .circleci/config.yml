@@ -155,13 +155,6 @@ jobs:
                 command: |
                   make verify-docs
 
-  deploy:
-    executor: jdk8
-    steps:
-      - checkout
-      - run:
-          name: Deploy
-          command: make deploy
 
   test:
     description: |
@@ -268,21 +261,4 @@ workflows:
           <<: *run_always
       - lint:
           <<: *run_always
-      # Releases, prereleases and snapshots all go through the same gate: the
-      # whole matrix has to be green first. A vX.Y.Z-SNAPSHOT tag is the way
-      # to exercise the full release path without cutting a release.
-      - deploy:
-          requires:
-            - test-1.12
-            - test-1.12-junixsocket
-            - test-1.13
-            - test-older
-            - test-windows
-            - lint
-          filters:
-            branches:
-              ignore: /.*/
-            tags:
-              only:
-                - /^v\d+\.\d+\.\d+(-(alpha|beta|rc)\d+)?$/
-                - /^v\d+\.\d+\.\d+-SNAPSHOT$/
+      # The deploy job was removed on this fork: nothing is released from here.
