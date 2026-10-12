@@ -37,7 +37,7 @@ kondo-clr:
 	rm -rf $(KONDO_CLR_DIR) && mkdir -p $(KONDO_CLR_DIR)
 	cp -r src $(KONDO_CLR_DIR)/src
 	find $(KONDO_CLR_DIR)/src -name '*.cljc' -exec sed -i 's/:cljr\b/:cljs/g' {} +
-	clojure -M:kondo-clr --lint $(KONDO_CLR_DIR)/src --config-dir .clj-kondo --config "$$(cat .clj-kondo/clr.edn)"
+	clojure -M:kondo-clr --lint $(KONDO_CLR_DIR)/src --config-dir .clj-kondo --config .clj-kondo/clr.edn
 
 cloverage:
 	clojure -M:cloverage
