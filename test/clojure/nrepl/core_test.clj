@@ -874,6 +874,38 @@
     (let [cli (nrepl/client conn Long/MAX_VALUE)]
       (is (= 2 (th/eval-value1 cli '(+ 1 1)))))))
 
+(def-repl-test test-url-connect-uri-object
+  (with-open [^nrepl.transport.FnTransport
+              conn (url-connect (java.net.URI. (str (transport-fn->protocol *transport-fn*)
+                                                    "://127.0.0.1:"
+                                                    (:port *server*))))]
+    (let [cli (nrepl/client conn Long/MAX_VALUE)]
+      (is (= 2 (th/eval-value1 cli '(+ 1 1)))))))
+
+(deftest url-connect-errors
+  (testing "an unknown scheme is rejected with the scheme and url in the message"
+    (let [e (try (url-connect "gopher://example.org:70")
+                 (catch IllegalArgumentException e e))]
+      (is (instance? IllegalArgumentException e))
+      (is (= "No nREPL support known for scheme gopher, url gopher://example.org:70"
+             (ex-message e)))))
+  (testing "the scheme is matched case-insensitively"
+    (is (= "nrepl" (nrepl/uri-scheme "NREPL://localhost:7888")))))
+
+(deftest socket-info
+  (testing "host and port are taken from the url"
+    (is (= {:host "example.org" :port 4005}
+           (#'nrepl/socket-info "nrepl://example.org:4005"))))
+  (testing "a url without a port has no :port"
+    (is (= {:host "example.org"}
+           (#'nrepl/socket-info "telnet://example.org")))))
+
+(deftest connect-requires-host-and-port-or-socket
+  (let [e (try (connect :host "127.0.0.1")
+               (catch IllegalArgumentException e e))]
+    (is (instance? IllegalArgumentException e))
+    (is (= "A host plus port or a socket must be supplied to connect." (ex-message e)))))
+
 (deftest test-ack
   (with-open [s (server/start-server :transport-fn *transport-fn*
                                      :handler (-> (server/default-handler)

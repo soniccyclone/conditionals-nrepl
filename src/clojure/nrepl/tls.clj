@@ -291,6 +291,10 @@
     (throw (ex-info "Could not create TLS context. Neither :tls-keys-str nor :tls-keys-file given."
                     {:nrepl/kind :nrepl.server/invalid-start-request}))))
 
+(defn handshake-exception?
+  [e]
+  (instance? SSLException e))
+
 (def enabled-protocols
   "An array of protocols we support."
   (into-array String ["TLSv1.3"]))

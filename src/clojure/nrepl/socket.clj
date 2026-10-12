@@ -110,6 +110,19 @@
           (.getLocalPort ^ServerSocket server-socket)
           nil nil nil)))
 
+(defn as-nrepl-uri-string
+  [server transport-scheme]
+  (.toASCIIString (as-nrepl-uri server transport-scheme)))
+
+(defn parse-uri
+  [s]
+  (let [^URI uri (if (instance? URI s)
+                   s
+                   (URI. ^String s))]
+    {:scheme (.getScheme uri)
+     :host (.getHost uri)
+     :port (.getPort uri)}))
+
 (defprotocol Acceptable
   (accept [s]
     "Accepts a connection on s.  Throws ClosedChannelException if s is
@@ -153,6 +166,28 @@
 (defn closed-exception?
   [e]
   (instance? ClosedChannelException e))
+
+(defn close-listener!
+  [s]
+  (.close ^java.io.Closeable s))
+
+(defn listener-closed?
+  [s]
+  (if (instance? ServerSocketChannel s)
+    (not (.isOpen ^ServerSocketChannel s))
+    (.isClosed ^ServerSocket s)))
+
+(defn local-port
+  [s]
+  (.getLocalPort ^ServerSocket s))
+
+(defn connect
+  [host port]
+  (Socket. ^String host (int port)))
+
+(defn close-connection!
+  [s]
+  (.close ^java.io.Closeable s))
 
 ;; We have to handle this ourselves for NIO because unfortunately read and write
 ;; hang if we use both Channels/newInputStream and Channels/newOutputStream.

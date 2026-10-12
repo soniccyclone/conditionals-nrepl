@@ -633,11 +633,11 @@ Exit:      Control+D or (exit) or (quit)"
   Returns connection header string."
   [{:keys [host port socket] :as server} options]
   (let [transport (:transport options)
-        ^java.net.URI uri (socket/as-nrepl-uri server (transport/uri-scheme transport))]
+        uri (socket/as-nrepl-uri-string server (transport/uri-scheme transport))]
     ;; The format here is important, as some tools (e.g. CIDER) parse the string
     ;; to extract from it the host and the port to connect to
     (if socket
-      (str "nREPL server started on socket " (.toASCIIString uri))
+      (str "nREPL server started on socket " uri)
       (format "nREPL server started on port %d on host %s - %s"
               port host uri))))
 

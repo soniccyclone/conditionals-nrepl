@@ -4,7 +4,12 @@
                                             System.Threading.Thread
                                             System.Array]}
            :unresolved-symbol {:exclude [System byte-array format class String
-                                         alter-var-root *err*]}}
- :config-in-ns {nrepl.bencode {:linters {:unresolved-symbol {:exclude [definline read-byte input buf
+                                         alter-var-root *err*
+                                         promise future deliver Exception with-open read-string
+                                         requiring-resolve InvalidOperationException
+                                         ArgumentException]}}
+ :config-in-ns {nrepl.ack {:linters {:invalid-arity {:level :off}
+                                    :unresolved-symbol {:exclude [transport]}}}
+                nrepl.bencode {:linters {:unresolved-symbol {:exclude [definline read-byte input buf
                                                                         off len b output s]}}}
                 nrepl.util.io {:linters {:redefined-var {:level :off}}}}}

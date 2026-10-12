@@ -15,16 +15,14 @@
    [nrepl.socket :as socket :refer [inet-socket unix-server-socket]]
    [nrepl.tls :as tls]
    [nrepl.transport :as t]
-   [nrepl.util.threading :as threading])
-  (:import
-   (java.net ServerSocket)
-   (javax.net.ssl SSLException)))
+   [nrepl.util.io :as io]
+   [nrepl.util.threading :as threading]))
 
 (defn handle*
   [msg handler transport]
   (try
     (handler (assoc msg :transport transport))
-    (catch Throwable t
+    (catch #?(:clj Throwable :cljr Exception) t
       (log t "Unhandled REPL handler exception processing message" msg))))
 
 (defn- normalize-msg
@@ -46,12 +44,16 @@
       (handle* msg handler transport))
     (recur handler transport)))
 
-(defn- safe-close
-  [^java.io.Closeable x]
+(defn- safe-close-with
+  [close! x]
   (try
-    (.close x)
-    (catch java.io.IOException e
+    (close! x)
+    (catch #?(:clj java.io.IOException :cljr System.IO.IOException) e
       (log e "Failed to close " x))))
+
+(defn- safe-close
+  [x]
+  (safe-close-with io/close! x))
 
 (defn- accept-connection-loop
   [{:keys [server-socket open-transports transport greeting handler]}
@@ -59,17 +61,17 @@
   (loop []
     (when-let [sock (try
                       (socket/accept server-socket)
-                      (catch SSLException ssl-exception
-                        (consume-exception ssl-exception)
-                        :tls-exception)
-                      (catch Throwable t
+                      (catch #?(:clj Throwable :cljr Exception) t
                         (consume-exception t)
-                        (when-not (or (socket/closed-exception? t)
-                                      (.isClosed ^ServerSocket server-socket))
-                          (log t "Unexpected exception in server loop")
-                          (safe-close server-socket) ; is this a good idea?
-                          (log "Shutting down server abruptly"))
-                        nil))]
+                        (if (tls/handshake-exception? t)
+                          :tls-exception
+                          (do
+                            (when-not (or (socket/closed-exception? t)
+                                          (socket/listener-closed? server-socket))
+                              (log t "Unexpected exception in server loop")
+                              (safe-close-with socket/close-listener! server-socket) ; is this a good idea?
+                              (log "Shutting down server abruptly"))
+                            nil))))]
       ;; If socket was closed (hence `sock` was nil), the loop is stopped. If
       ;; there was a TLS exception, e.g. bad client cert, skip the error but
       ;; continue the loop.
@@ -81,7 +83,7 @@
                (swap! open-transports conj transport)
                (when greeting (greeting transport))
                (handle handler transport)
-               (catch Throwable t
+               (catch #?(:clj Throwable :cljr Exception) t
                  (when-not (socket/disconnected? t)
                    (throw t)))
                (finally
@@ -91,17 +93,13 @@
 
 (defn stop-server
   "Stops a server started via `start-server`."
-  [{:keys [open-transports ^java.io.Closeable server-socket] :as server}]
-  (.close server-socket)
+  [{:keys [open-transports server-socket] :as server}]
+  (socket/close-listener! server-socket)
   (swap! open-transports
          #(reduce
            (fn [s t]
-             ;; should always be true for the socket server...
-             (if (instance? java.io.Closeable t)
-               (do
-                 (safe-close t)
-                 (disj s t))
-               s))
+             (safe-close t)
+             (disj s t))
            % %))
   server)
 
@@ -168,8 +166,10 @@
             ;; handler. Called with the connection's corresponding
             ;; nrepl.transport/Transport object
   handler]  ;; The message handler function to use for connected clients
-  java.io.Closeable
-  (close [this] (stop-server this)))
+  #?@(:clj [java.io.Closeable
+            (close [this] (stop-server this))]
+      :cljr [System.IDisposable
+             (Dispose [this] (stop-server this))]))
 
 (defn start-server
   "Starts a socket-based nREPL server.  Configuration options include:
@@ -224,7 +224,7 @@
                  (inet-socket bind port))
         server (Server. ss
                         (when-not socket bind)
-                        (when-not socket (.getLocalPort ^java.net.ServerSocket ss))
+                        (when-not socket (socket/local-port ss))
                         socket
                         (atom #{})
                         transport-fn

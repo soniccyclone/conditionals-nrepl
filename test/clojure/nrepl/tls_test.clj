@@ -50,6 +50,12 @@
   (let [e (noisy-deref exception-promise)]
     (instance? SSLException e)))
 
+(deftest handshake-exception-test
+  (is (tls/handshake-exception? (SSLException. "bad")))
+  (is (tls/handshake-exception? (SSLHandshakeException. "bad")))
+  (is (not (tls/handshake-exception? (java.io.IOException. "bad"))))
+  (is (not (tls/handshake-exception? nil))))
+
 (deftest bad-config
   (is (thrown? ExceptionInfo (server/start-server :tls? true)))
   (is (= :nrepl.server/invalid-start-request
