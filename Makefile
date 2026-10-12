@@ -27,11 +27,6 @@ cljfmt:
 kondo:
 	clojure -M:kondo
 
-# Advisory lint of the ClojureCLR branches. clj-kondo has no :cljr language
-# (configuring it as a feature makes kondo fail with "No matching clause:
-# :cljr"), so this lints a scratch copy of src with :cljr rewritten to :cljs.
-# Expect some noise from System.* interop; extend .clj-kondo/clr.edn as needed.
-# Not part of `make lint`.
 KONDO_CLR_DIR := $(or $(TMPDIR),/tmp)/nrepl-kondo-clr
 kondo-clr:
 	rm -rf $(KONDO_CLR_DIR) && mkdir -p $(KONDO_CLR_DIR)

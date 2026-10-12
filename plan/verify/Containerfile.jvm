@@ -1,8 +1,4 @@
-# JVM test environment for the Phase 0 baseline: Clojure CLI + Temurin 21 + make.
-# Build:  podman build -t nrepl-jvm -f plan/verify/Containerfile.jvm plan/verify
-# Run:    podman run --rm --security-opt label=disable -v "$PWD":/work -v "$HOME/.m2":/root/.m2 -w /work nrepl-jvm make test
 FROM docker.io/library/clojure:temurin-21-tools-deps-bookworm-slim
-# The base image exports CLOJURE_VERSION=<cli version>; the Makefile uses the variable as the Clojure alias.
 ENV CLOJURE_VERSION=1.12
 RUN apt-get update \
  && apt-get install -y --no-install-recommends make git gcc libc6-dev procps \

@@ -1,6 +1,3 @@
-;; Acceptance helper for PR 4: print the sorted multiset of thread names of an
-;; nREPL JVM after one server start, one connection and one eval. Ids and
-;; counters are normalised so two runs can be diffed.
 (require '[clojure.string :as str]
          '[nrepl.core :as nrepl]
          '[nrepl.server :as server])

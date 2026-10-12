@@ -1,5 +1,4 @@
-{;; Include .cljr (ClojureCLR host implementations) in formatting checks.
- :file-pattern #re "\\.clj[csrx]?$"
+{:file-pattern #re "\\.clj[csrx]?$"
  :extra-indents {run-with [[:inner 0]]
                  testing-print [[:inner 0]]
                  safe-handle [[:inner 0]]}}
