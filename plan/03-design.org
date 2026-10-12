@@ -2,15 +2,15 @@
 #+OPTIONS: ^:nil toc:2 num:nil
 #+DATE: 2026-10-11
 
-This is the specification an implementer follows. Every seam function has a signature, a JVM body (today's code, moved) and a CLR body (the .NET API it wraps). Claim ids such as =TH6= or =C2= point at [[file:verify/claims.org][verify/claims.org]]; their evidence is in [[file:verify/results.org][verify/results.org]]. Line numbers are those of commit =d00d171= (=df1ed8a= adds only =plan/= files). Second revision: incorporates the verification run, a Sonnet dry run of PR 4, and four reviews (upstream maintainer, CLR API, test impact, interop coverage).
+This is the specification an implementer follows. Every seam function has a signature, a JVM body (today's code, moved) and a CLR body (the .NET API it wraps). Claim ids such as =TH6= or =C2= point at [[file:verify/claims.org][verify/claims.org]]; their evidence is in [[file:verify/results.org][verify/results.org]]. Line numbers are those of commit =d00d171= (=df1ed8a= adds only =plan/= files). Second revision: incorporates the verification run, a Sonnet dry run of slice 4, and four reviews (maintainer lens, CLR API, test impact, interop coverage). Third revision: Nathan's decisions of 2026-10-11 (one thread per task, a C# helper assembly, a pure-Clojure error abstraction); nothing here is shaped for upstream, this is a heavily modified fork.
 
 * Shape
 One source tree, two load paths.
 - Shared files are =.cljc=. A shared file never names a host type; it calls a seam, or uses one of the inline =#?= forms listed in [[Inline sites in shared files]].
 - A seam is the *existing* namespace where one exists (=nrepl.util.threading=, =nrepl.util.out=), or a new =nrepl.util.*= namespace (=nrepl.util.io=, =nrepl.util.reflect=, =nrepl.util.runtime=). The seam file is =.cljc=; its =ns= form requires the host implementation conditionally and re-exports it. Implementations live beside it: =nrepl.util.threading.jvm= (=threading/jvm.clj=) and =nrepl.util.threading.clr= (=threading/clr.cljr=). No parallel =nrepl.host.*= tree.
-- Two namespaces share nothing between hosts and are not seamed: =nrepl.socket= and =nrepl.tls= stay =.clj= untouched, and the CLR load path carries =nrepl/socket.cljr= and =nrepl/tls.cljr= that define the same public functions (ClojureCLR loads =.cljr= before =.clj=, =A3=; the JVM never reads a =.cljr=). The upstream diff for them is only the call-site changes in =transport=, =server=, =core= and =cmdline= that make both files sufficient.
+- Two namespaces share nothing between hosts and are not seamed: =nrepl.socket= and =nrepl.tls= stay =.clj= untouched, and the CLR load path carries =nrepl/socket.cljr= and =nrepl/tls.cljr= that define the same public functions (ClojureCLR loads =.cljr= before =.clj=, =A3=; the JVM never reads a =.cljr=). Shared code calls only the contract table below, so either file suffices.
 - =nrepl.cmdline= stays =.clj=. Its pure half (option parsing, help text, =server-opts=, URL helpers) is extracted into =nrepl.cmdline.options= (=.cljc=); the CLR gets a server-only =nrepl/cmdline.cljr= entry on top of it (D17).
-- Every seam namespace carries ={:no-doc true}= and a docstring "internal host seam; not covered by the compatibility policy", so upstream does not inherit ~60 public vars to support forever. Shared code only calls what the tables below list.
+- Every seam namespace carries ={:no-doc true}= and a docstring "internal host seam". Shared code only calls what the tables below list.
 
 Mechanics an implementer must know (all verified):
 - A façade =(def f impl/f)= copies the value: the façade var has none of the impl var's metadata, =definline= inlining is lost through it, and =with-redefs= on the impl var is invisible through the façade. Therefore: hot byte primitives stay inline in =nrepl.bencode= (see the io seam), macros that must expand differently per host live in the =.cljc= façade with =#?= inside the macro body, and tests redefine impl vars by their impl namespace.
@@ -26,7 +26,7 @@ Mechanics an implementer must know (all verified):
 - =(str true)= is ="True"= on the CLR, =(str 1.0)= is ="1"= (=L8=); shared code that stringifies booleans for the wire coerces them explicitly.
 - =random-uuid= and =parse-long= are Clojure 1.11; nREPL supports 1.10, so they are not portable replacements (=L2= refuter). Use one-line =#?= forms.
 
-Why this shape and not the others is scored in [[file:05-decisions.org][05-decisions]] D11.
+Why this shape and not the others is scored in [[file:05-decisions.org][05-decisions]] D11 (decided).
 
 * Seams
 ** nrepl.util.threading
@@ -35,8 +35,8 @@ Replaces ~src/clojure/nrepl/util/threading.clj~ (whole), ~src/clojure/nrepl/midd
 
 | Function | Contract | JVM (=nrepl.util.threading.jvm=) | CLR (=nrepl.util.threading.clr=) |
 |---+---+---+---|
-| =(make-executor {:name-fmt s :kind k})= → executor | =k= is =:loop= (each task gets its own long-lived thread; only ever receives infinite loops or user evals) or =:pool= (short tasks that never run user code). =name-fmt= is today's =%d= format, e.g. ="nREPL-handler-%d"= | both kinds =(Executors/newCachedThreadPool (thread-factory name-fmt))=; =:kind= ignored | =:loop=: thread-per-task, =Thread= + =gen-delegate ThreadStart= (=C4=; =sys-action= is rejected by =Thread=), =IsBackground=true=, =Name= from the format and a counter; =:pool=: =ThreadPool/QueueUserWorkItem=; both wrap the body in the catch-all (=TH13=). Pool threads cannot be named |
-| =(submit! executor f)= → handle | runs =f= (0-arg) asynchronously; returns a cancellable handle | =(.submit executor ^Runnable f)= | starts the thread (=:loop=) or queues (=:pool=); the handle holds a cancelled flag and, for =:loop=, the thread; the wrapper binds a thread-local reference to the handle for =cancelled?= / =cancel-current!= |
+| =(make-executor {:name-fmt s})= → executor | one thread per submitted task, named from today's =%d= format, e.g. ="nREPL-handler-%d"= (D1/D2: no pool anywhere) | =(Executors/newCachedThreadPool (thread-factory name-fmt))=, which is thread-per-task with reuse | thread-per-task: =Thread= + =gen-delegate ThreadStart= (=C4=; =sys-action= is rejected by =Thread=), =IsBackground=true=, =Name= from the format and a counter, body wrapped in the catch-all (=TH13=) |
+| =(submit! executor f)= → handle | runs =f= (0-arg) asynchronously; returns a cancellable handle | =(.submit executor ^Runnable f)= | starts the thread; the handle holds a cancelled flag and the thread; the wrapper binds a thread-local reference to the handle for =cancelled?= / =cancel-current!= |
 | =(cancel! handle)= | sets the handle's cancelled flag and interrupts its thread if it is blocked in a wait | =(.cancel fut true)= | set flag; =(.Interrupt thread)= when the handle owns one (=TH1=) |
 | =(cancelled?)= | zero-arg: true once =cancel!= or =cancel-current!= was called for the task running on the current thread; loops test it instead of =Thread/interrupted= | =(Thread/interrupted)= (clears the flag, as today) | read the thread-local handle's flag |
 | =(cancel-current!)= | the task marks itself cancelled (the reader loop does this after a transport failure, ~transport.clj:67~) | =(.interrupt (Thread/currentThread))= | set the current handle's flag |
@@ -53,7 +53,7 @@ Replaces ~src/clojure/nrepl/util/threading.clj~ (whole), ~src/clojure/nrepl/midd
 | =(stop-exception? e)= | true when =e= or anything in its cause chain is the exception a forced stop injects; =interruptible-eval='s =caught= uses it to suppress the =:eval-error= reply (~interruptible_eval.clj:117-124~). A plain interrupt of a sleeping eval is *not* a stop: the JVM reports =:ex "class java.lang.InterruptedException"= (~core_test.clj:477-501~) and the CLR reports =ThreadInterruptedException= the same way | today's =interrupted?= moved verbatim (=ThreadDeath= as =root-cause=, or a =Compiler$CompilerException= whose cause is =ThreadDeath=) | walk =.InnerException= for =System.Threading.ThreadAbortException= or =System.OperationCanceledException= (inside the body user code sees =ThreadAbortException=; =Run= surfaces =OperationCanceledException=, or a =Compiler+CompilerException= wrapping the abort when it lands in the compiler, =TH6=); do not use =root-cause=, which stops at =CompilerException= on the CLR |
 | =(alive? sthread)= | true from =start-session-thread!= until =run-fn= returned | =(not= (.getState t) Thread$State/TERMINATED)= | =(.IsAlive t)= (=TH12=) |
 
-Executors: =listen-executor= ="nREPL-server-%d"= =:loop=; =connection-executor= ="nREPL-connection-%d"= =:loop= (new; the per-connection =handle= loop at ~server.clj:80~ moves here from =handle-executor=, which on the CLR would park a pool thread per connection); =transport-executor= ="nREPL-transport-%d"= =:loop= (reader loops only; the stdout callbacks at ~util/out.clj:51~ move to =handle-executor=); =handle-executor= ="nREPL-handler-%d"= =:pool=; =ephemeral-executor= ="nREPL-ephemeral-session-%d"= =:loop= in =nrepl.middleware.session= (user evals block; the .NET pool would starve =handle*=, D2). On the JVM every one of them is still a cached pool; only two thread-name prefixes change (connection, callbacks).
+Executors: =listen-executor= ="nREPL-server-%d"=; =connection-executor= ="nREPL-connection-%d"= (new; the per-connection =handle= loop at ~server.clj:80~ moves here from =handle-executor=); =transport-executor= ="nREPL-transport-%d"= (reader loops; the stdout callbacks at ~util/out.clj:51~ move to =handle-executor=); =handle-executor= ="nREPL-handler-%d"=; =ephemeral-executor= ="nREPL-ephemeral-session-%d"= in =nrepl.middleware.session=. All are thread-per-task on both hosts (D1/D2); on the JVM only two thread-name prefixes change (connection, callbacks).
 
 *** Interrupt policy (D3, decided: forced stop is primary)
 The CLR mirrors the JVM =interrupt-stop= exactly; only the kill primitive differs. .NET 8 ships =System.Runtime.ControlledExecution.Run= (=TH5=, =TH6=): it aborts the thread at its next safe point, which includes the back-edge of a tight =loop/recur= (16–18 ms after =Cancel= for every loop shape tested), runs =finally= blocks, surfaces =OperationCanceledException= to the caller of =Run=, and leaves the runtime usable afterwards. Inside the aborted body a user =(catch Exception …)= handler runs but cannot swallow the abort; the abort is re-raised when the handler exits. Because =Run= wraps the body rather than targeting a thread, every exec runs through =run-interruptible= on the session thread, and the reaper is the only caller of =Cancel=.
@@ -67,7 +67,7 @@ Opt-out only: =(:force-interrupt config true)=, read by =interrupt-stop= on both
 ** nrepl.util.io
 New seam for readers, writers, stdin and byte-level values that are not on the bencode hot path. Replaces ~transport.clj:24-33,81-89,128-130,137-155,163-179,186-212~, ~session.clj:17-18,45-53,173,386-397~, ~middleware/print.clj:11-15,50-69~, ~middleware/interruptible_eval.clj:16-19,25-44,53-55,65-70,103,112-116,152-155,192-193~, ~config.clj:62-66~, and ~src/java/nrepl/in/QueuePollingReader.java~, ~src/java/nrepl/out/*.java~ (which stay compiled and are referenced only from =nrepl.util.io.jvm=).
 
-Bencode's byte primitives do *not* go through the seam (the façade would drop =definline=, upstream review): =read-byte=, =read-fully!=, =unread-byte!=, =write-byte!=, =write-bytes!=, =utf8-bytes=, =utf8-string= are private =definline=s in =nrepl.bencode= itself using operator-position =#?=: =(#?(:clj .read :cljr .ReadByte) in)=, =(.Read in buf off len)= with 0 at EOF tested as =(and (zero? n) (pos? len))= (an empty netstring =0:= is a legal zero-length read, =L1=), =(.WriteByte out b)= / =(.Write out buf 0 n)= (the 1-arg =Write= compiles against =ReadOnlySpan= and throws at runtime, =E2=), =Encoding/UTF8=. All verified in =L1=.
+Bencode's byte primitives do *not* go through the seam (the façade would drop =definline=, maintainer-lens review): =read-byte=, =read-fully!=, =unread-byte!=, =write-byte!=, =write-bytes!=, =utf8-bytes=, =utf8-string= are private =definline=s in =nrepl.bencode= itself using operator-position =#?=: =(#?(:clj .read :cljr .ReadByte) in)=, =(.Read in buf off len)= with 0 at EOF tested as =(and (zero? n) (pos? len))= (an empty netstring =0:= is a legal zero-length read, =L1=), =(.WriteByte out b)= / =(.Write out buf 0 n)= (the 1-arg =Write= compiles against =ReadOnlySpan= and throws at runtime, =E2=), =Encoding/UTF8=. All verified in =L1=.
 
 | Function | Contract | JVM (=nrepl.util.io.jvm=) | CLR (=nrepl.util.io.clr=) |
 |---+---+---+---|
@@ -84,14 +84,14 @@ Bencode's byte primitives do *not* go through the seam (the façade would drop =
 | =(string-reader s)= / =(string-writer)= / =(writer->string w)= | | =StringReader= / =StringWriter= / =str= | =System.IO.StringReader= / =StringWriter= / =.ToString= (the callback writer overrides =ToString=) |
 | =(write-string! w s)= / =(flush! w)= / =(close! x)= / =(closeable? x)= | for text writers and byte streams alike | =.write= / =.flush= / =.close= / =(instance? Closeable x)= | =.Write= / =.Flush= / =.Dispose= / =(instance? IDisposable x)= (=B7=) |
 | =(file-name path)= | =short-file-name= (~interruptible_eval.clj:53-55~) | =(.getName (io/file p))= | =(Path/GetFileName p)= |
-| =(stdin-reader need-input-fn)= → reader | the =*in*= source fed by the =stdin= op; satisfies =StdinSink= | =QueuePollingReader= | the proxy below |
-| protocol =StdinSink=: =(add-input! r s)= / =(add-eof! r)= | | on =QueuePollingReader= | on the proxy's companion type |
-| =(replying-writer callback buffer-size quota)= → writer | the writer bound as =*out*= / =*err*=: buffers, hands complete lines (or =buffer-size= units) to =callback=, enforces =quota= | exactly today's chain: =CallbackBufferedOutputStream= → =(OutputStreamWriter. s StandardCharsets/UTF_8)= → =QuotaBoundWriter= → =(PrintWriter. w true)=; returns the =PrintWriter= (sanity_test calls =.println= and =.write= on it) | the proxy below; buffer counts UTF-16 units and keeps a trailing high surrogate (=E3=) |
+| =(stdin-reader need-input-fn)= → reader | the =*in*= source fed by the =stdin= op; satisfies =StdinSink= | =QueuePollingReader= | =nrepl.QueuePollingReader= from =src/csharp= (D5), a line-for-line port of the Java class with =Read()= returning -1 at EOF, bulk =Read= 0 at EOF, non-blocking =Peek= from its queue, and the interrupt re-latch; the proxy below is the verified fallback |
+| protocol =StdinSink=: =(add-input! r s)= / =(add-eof! r)= | | on =QueuePollingReader= | on the C# class (=AddInput= / =AddEof=) |
+| =(replying-writer callback buffer-size quota)= → writer | the writer bound as =*out*= / =*err*=: buffers, hands complete lines (or =buffer-size= units) to =callback=, enforces =quota= | exactly today's chain: =CallbackBufferedOutputStream= → =(OutputStreamWriter. s StandardCharsets/UTF_8)= → =QuotaBoundWriter= → =(PrintWriter. w true)=; returns the =PrintWriter= (sanity_test calls =.println= and =.write= on it) | =nrepl.CallbackBufferedWriter= → =nrepl.QuotaBoundWriter= from =src/csharp= (D5), ports of the Java classes over =TextWriter=; the buffer counts UTF-16 units and keeps a trailing high surrogate (=E3=); the proxy below is the verified fallback |
 | =(print-with-quota writer f)= → truncated? | runs =f=; true when the quota was hit | =(try (f) false (catch QuotaExceeded _ true))=, wrapped around the whole =with-open= so close → flush → callback still precedes the catch (~print.clj:81-84~) | =f= under a catch of =ex-info {:nrepl/kind ::quota-exceeded}=, then also read the proxy's =exceeded?= flag (a user =catch Exception= inside a =print-method= cannot hide the truncation) |
-| =(tee-writer original callback)= | the writer installed by =nrepl.util.out/wrap-standard-streams=: forwards to =original= and feeds complete lines to =callback=; guards against recursive flush as =TeeOutputStream= does | =(PrintStream. (TeeOutputStream. original (CallbackBufferedOutputStream. callback 1024)))= | a =TextWriter= proxy; the state (=original-print-streams=, =callbacks=, =wrapped?=) stays in =nrepl.util.out= |
+| =(tee-writer original callback)= | the writer installed by =nrepl.util.out/wrap-standard-streams=: forwards to =original= and feeds complete lines to =callback=; guards against recursive flush as =TeeOutputStream= does | =(PrintStream. (TeeOutputStream. original (CallbackBufferedOutputStream. callback 1024)))= | =nrepl.TeeWriter= from =src/csharp= (D5); the state (=original-print-streams=, =callbacks=, =wrapped?=) stays in =nrepl.util.out= |
 | =(install-system-writers! out err)= / =(system-writers)= | process-wide stdout/stderr replacement and capture | =System/setOut= / =System/setErr=; =System/out= / =System/err= | =Console/SetOut= / =SetError= (wrapped in =SyncTextWriter=, restore means =SetOut= of the saved original, =E8=); ClojureCLR's root =*out*= / =*err*= bypass =Console.Out= and have =AutoFlush false=, so =wrap-standard-streams= also =alter-var-root=s them and the tee flushes itself (=E7=) |
 
-The stdin proxy, exactly (=C1=, =E5=, =E9=, CLR review):
+The =src/csharp= classes follow the Java sources line for line with the TextReader/TextWriter contracts from =C1=, =C2=, =E5=, =E9=, =E10= (=Read()= -1 at EOF, bulk =Read= 0 at EOF, non-blocking =Peek=, =WriteLine= as =Write(string)= + newline, =Dispose(bool)= flushing before the enclosing catch). The verified proxy fallback for the stdin reader (=C1=, =E5=, =E9=, CLR review):
 #+begin_src clojure
 (proxy [System.IO.TextReader] []
   (Peek [] (int (poll-char)))                 ; non-blocking, from the queue; never -1 while data is queued
@@ -103,7 +103,7 @@ The stdin proxy, exactly (=C1=, =E5=, =E9=, CLR review):
 #+end_src
 =read-char= takes from a =BlockingCollection<string>= with a private EOF sentinel compared by =identical?=, sends =need-input= when empty, and on =ThreadInterruptedException= re-interrupts the current thread and returns -1, as =QueuePollingReader.java:61-65= does. Every int-returning method returns =(int …)=: a long throws =InvalidCastException=, nil throws =NullReferenceException=. The =Read(Span<char>)= override the proxy generates throws =InvalidProgramException= if called; nothing in nREPL or ClojureCLR calls it.
 
-The callback writer, exactly (=C2=, =E10=, CLR review):
+The verified proxy fallback for the callback writer (=C2=, =E10=, CLR review):
 #+begin_src clojure
 (proxy [System.IO.TextWriter] []
   (get_Encoding [] System.Text.Encoding/UTF8)
@@ -115,7 +115,7 @@ The callback writer, exactly (=C2=, =E10=, CLR review):
                       (write-str this (String. ^chars a (int b) (int c))))))
   (Flush [] …) (Dispose [disposing] (flush!) …) (ToString [] …))
 #+end_src
-Every body runs under =locking= on a private object (the JVM chain is thread-safe; a proxy is not). Never use =proxy-super= for =Write=: it unmaps every =Write= overload for the duration and the base re-dispatch silently drops text (the prior-art writer has this bug). =WriteLine= arrives as =Write(string)= then =Write(newline)=. Measured cost ~15 ns per =Write(char)= in steady state (=C3=): the proxy stays; a C# class would only be needed for a =Span= caller.
+Every body runs under =locking= on a private object (the JVM chain is thread-safe; a proxy is not). Never use =proxy-super= for =Write=: it unmaps every =Write= overload for the duration and the base re-dispatch silently drops text (the prior-art writer has this bug). =WriteLine= arrives as =Write(string)= then =Write(newline)=. Measured cost ~15 ns per =Write(char)= for the proxy versus ~4 ns for the C# class (=C3=); the C# class is the decision (D5).
 
 ** nrepl.util.out
 Stays the owner of =original-print-streams=, =callbacks= and =wrapped?= (=out_test= reads the private atoms). =wrap-standard-streams= builds the tee through =io/tee-writer= and =io/install-system-writers!=, then =bindRoot= / =alter-var-root= of =*out*=, =*err*= and =clojure.test/*test-out*= as today. =unwrap-standard-streams= is a new public function shipped as its own PR with a CHANGELOG line: restores the captured originals, resets =wrapped?=, keeps callbacks registered, idempotent. =run-stream-callbacks= submits to =handle-executor=.
@@ -130,7 +130,7 @@ No façade. =nrepl/socket.clj= and =nrepl/tls.clj= are untouched; =nrepl/socket.
 | =(closed-exception? e)= / =(close-listener! s)= / =(listener-closed? s)= / =(local-port s)= | | =ClosedChannelException= / =.close= / =.isClosed= / =.getLocalPort= | flag-based / =.Stop= / flag / =(.Port ^IPEndPoint (.LocalEndpoint l))= (read after =Start= only, =F1=) |
 | =(is-connected? s)= | | =.isConnected= (sticky) | =.Connected= (flips only after a failed I/O, =F6=); the disconnection predicate below carries the load |
 | =(buffered-input s)= / =(buffered-output s)= | the byte streams the transports wrap | today's protocols incl. the NIO =BufferedOutputChannel= | one =(NetworkStream. sock true)= per connection; =buffered-input= = =(BufferedStream. ns)= used by the reader thread only; =buffered-output= = the =NetworkStream= itself (each message is already a =MemoryStream=) |
-| =(write out bytes)= / =(write out bytes off len)= | the transport's final write (protocol =Writable= today; the NIO path is not an =OutputStream=, upstream review) | unchanged | =(.Write ns buf 0 n)= |
+| =(write out bytes)= / =(write out bytes off len)= | the transport's final write (protocol =Writable= today; the NIO path is not an =OutputStream=, maintainer-lens review) | unchanged | =(.Write ns buf 0 n)= |
 | =(close-connection! s)= | ends a blocked reader | =.close= | =(.Dispose sock)=: the blocked =Read= throws =IOException(ConnectionAborted)= (=TH4=, =F6=) |
 | =(disconnected-exception msg)= / =(disconnected? e)= | what =rethrow-on-disconnection= throws and what =server.clj:87= catches | =(SocketException. msg)= / =instance?= | =(IOException. msg)= / =IOException= wrapping =SocketException= =ConnectionAborted= or =ConnectionReset=, =EndOfStreamException= (=F6=) |
 | =(as-nrepl-uri-string server scheme)= | the ASCII =nrepl://host:port= / =nrepl+unix:path= text clients parse (~cmdline.clj:636-640~) | =(.toASCIIString (as-nrepl-uri …))= | built by hand: =System.Uri= adds a trailing slash to the host form (=F8=) |
@@ -165,6 +165,11 @@ Host identity, exceptions, compiler bindings, process and environment. Small, on
 | =(version-string)= | nREPL's own version for =describe= | today's =pom.properties= / =-Dnrepl.version= lookup, unchanged | =(AppContext/GetData "nrepl.version")= or the assembly attribute written by the NuGet packager (phase 3); ="" = until then, which is also what a JVM source checkout reports |
 
 Not seamed on purpose: =Compiler/SOURCE_PATH= and =Compiler/SOURCE= (~interruptible_eval.clj:127-128~) are =#'clojure.core/*file*= and =#'clojure.core/*source-path*= on both hosts (CLR review), so the shared code binds those vars directly; =(str (symbol kw))= replaces =(.sym ^Keyword kw)= (~bencode.clj:318~); =(.ns v)= / =(.sym v)= on vars work on both hosts (=L4=).
+
+* Errors (D6)
+Every error nREPL itself raises is a pure Clojure =ex-info= with a =:nrepl/kind= keyword and a message written for a human; shared code never constructs or catches a host exception class. The kinds: =::disconnected= (the transport lost its peer), =::listener-closed= (accept after =stop-server=), =::eof= (a message ended early), =::quota-exceeded= (print quota), =::tls-unsupported=, =::stopped= (a forced stop), =::invalid-message= (bencode top level is not a map). The host seams are where native exceptions are mapped: =socket/disconnected?=, =socket/closed-exception?=, the bencode EOF constructors, =threading/stop-exception?= and =io/print-with-quota= each recognise their host's exception and rethrow or return the kind. =safe-handle= reports =(ex-message e)= and, when present, =(:nrepl/kind (ex-data e))= as =:ex-kind=.
+
+User exceptions escaping =eval= keep the host's own class name in =:ex= / =:root-ex=, because they are the user's exceptions and =(str (class e))= already gives the host spelling (=B6=); the reply also carries =:ex-kind= (=:eval-error=, =:read-error=, =:print-error=, =:stopped=) so a client never has to parse the name.
 
 * Flows
 ** Eval and interrupt
@@ -229,7 +234,7 @@ orgPlanSequence('interrupt', {
 #+END_EXPORT
 
 ** Transport reader loop (rewritten in PR 4)
-Today's loop (~transport.clj:57-67~) ends itself by interrupting its own thread, and its =InterruptedException= branch "works" only because =SynchronousQueue.put(nil)= throws (upstream review). The seam version, identical in behaviour on the JVM:
+Today's loop (~transport.clj:57-67~) ends itself by interrupting its own thread, and its =InterruptedException= branch "works" only because =SynchronousQueue.put(nil)= throws (maintainer-lens review). The seam version, identical in behaviour on the JVM:
 #+begin_src clojure
 (let [read-queue (threading/make-rendezvous)
       stop       (volatile! false)
