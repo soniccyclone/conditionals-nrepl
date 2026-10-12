@@ -11,6 +11,7 @@
   (:require
    [nrepl.misc :as misc]
    [nrepl.transport :as t :refer [safe-handle]]
+   [nrepl.util.runtime :as runtime]
    [nrepl.version :as version]))
 
 ;; Registering dynvars that are used to configure middleware. This lives here
@@ -41,11 +42,6 @@
   [m]
   (into {} (filter (fn [[_ v]] (or (number? v) (string? v))) m)))
 
-(defn- java-version
-  []
-  {:major misc/java-version
-   :version-string (System/getProperty "java.version")})
-
 (defn- describe-reply
   [{:keys [verbose?] :as msg} middleware]
   (let [descriptors (mapv (comp ::descriptor meta) middleware)
@@ -64,7 +60,7 @@
       :versions {:nrepl (safe-version version/version)
                  :clojure (safe-version
                            (assoc *clojure-version* :version-string (clojure-version)))
-                 :java (safe-version (java-version))}
+                 #?(:clj :java :cljr :clr) (safe-version (runtime/host-version))}
       :status :done}
      (when aux {:aux aux}))))
 

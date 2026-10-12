@@ -10,9 +10,9 @@
             [nrepl.middleware.caught :as caught]
             [nrepl.middleware.interruptible-eval :as eval]
             [nrepl.middleware.print :as print]
-            [nrepl.misc :refer [resolve-in-session]])
-  (:import (clojure.lang Compiler)
-           (nrepl.transport Transport)))
+            [nrepl.misc :refer [resolve-in-session]]
+            [nrepl.util.runtime :as runtime])
+  (:import (nrepl.transport Transport)))
 
 ;; In this middleware, we implement loading whole the file by nREPL from start
 ;; to finish. This used to be implemented by calling out to `Compiler/load`.
@@ -23,20 +23,18 @@
 ;; the old approach.
 
 (defn- per-file-bindings [msg]
-  {Compiler/METHOD nil
-   Compiler/LOCAL_ENV nil
-   Compiler/LOOP_LOCALS nil
-   Compiler/NEXT_LOCAL_NUM 0
+  (merge
+   (runtime/load-file-bindings)
    ;; We don't set LINE_BEFORE, COLUMN_BEFORE, LINE_AFTER, COLUMN_AFTER because
    ;; it looks like it doesn't change much for our usecase. But this is still to
    ;; be confirmed.
-   #'*read-eval* true
-   ;; This function runs in "server context" (not yet in session context), so
-   ;; make sure to resolve dynvar variables from session.
-   #'*ns* (resolve-in-session msg *ns*)
-   #'*unchecked-math* (resolve-in-session msg *unchecked-math*)
-   #'*warn-on-reflection* (resolve-in-session msg *warn-on-reflection*)
-   #'*data-readers* (resolve-in-session msg *data-readers*)})
+   {#'*read-eval* true
+    ;; This function runs in "server context" (not yet in session context), so
+    ;; make sure to resolve dynvar variables from session.
+    #'*ns* (resolve-in-session msg *ns*)
+    #'*unchecked-math* (resolve-in-session msg *unchecked-math*)
+    #'*warn-on-reflection* (resolve-in-session msg *warn-on-reflection*)
+    #'*data-readers* (resolve-in-session msg *data-readers*)}))
 
 (defn- load-file-eval-msg
   [{:keys [file file-path ^Transport transport] :as msg}]

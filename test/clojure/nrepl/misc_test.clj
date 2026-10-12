@@ -5,6 +5,9 @@
             [clojure.java.io :as io])
   (:import [java.net URI]))
 
+(deftest parse-java-version-test
+  (is (= misc/java-version (misc/parse-java-version))))
+
 (deftest sanitize-meta-test
   (is (not-empty (:file (misc/sanitize-meta {:file "clojure/core.clj"}))))
 

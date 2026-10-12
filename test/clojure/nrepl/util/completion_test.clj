@@ -4,7 +4,8 @@
             [clojure.test :refer :all]
             [matcher-combinators.matchers :as mc]
             [nrepl.util.completion :as completion :refer [completions]]
-            [nrepl.test-helpers :refer [is+]]))
+            [nrepl.test-helpers :refer [is+]])
+  (:import (java.io File)))
 
 (def t-var "var" nil)
 (defn t-fn "fn" [x] x)
@@ -103,7 +104,7 @@
     (is+ (mc/embeds [{:candidate "Integer/parseInt" :type :static-method}])
          (completions "Integer/parseInt" 'clojure.core))
     (is+ (mc/embeds [{:candidate "File/separator", :type :static-field}])
-         (completions "File/" 'nrepl.util.completion))
+         (completions "File/" 'nrepl.util.completion-test))
     (is+ (mc/embeds [{:candidate ".toString" :type :method}])
          (completions ".toString" 'clojure.core))))
 

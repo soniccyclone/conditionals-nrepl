@@ -12,4 +12,17 @@
                                     :unresolved-symbol {:exclude [transport]}}}
                 nrepl.bencode {:linters {:unresolved-symbol {:exclude [definline read-byte input buf
                                                                         off len b output s]}}}
-                nrepl.util.io {:linters {:redefined-var {:level :off}}}}}
+                nrepl.cmdline.options {:linters {:unresolved-symbol {:exclude [spit]}
+                                                 :unused-binding {:level :off}}}
+                nrepl.middleware {:linters {:unresolved-symbol {:exclude [*clojure-version* clojure-version]}}}
+                nrepl.middleware.load-file {:linters {:unresolved-symbol {:exclude [*read-eval* *unchecked-math*
+                                                                                    *warn-on-reflection* *data-readers*]}}}
+                nrepl.misc {:linters {:redefined-var {:level :off}
+                                      :unresolved-namespace {:exclude [Int32 System.Guid]}
+                                      :unresolved-symbol {:exclude [clojure]}}}
+                nrepl.util.completion {:linters {:unresolved-namespace {:exclude [Char StringComparison]}
+                                                 :unresolved-symbol {:exclude [*clojure-version* *unchecked-math*
+                                                                               Object all-ns class? clojure
+                                                                               ns-aliases ns-map]}}}
+                nrepl.util.io {:linters {:redefined-var {:level :off}}}
+                nrepl.util.lookup {:linters {:unresolved-symbol {:exclude [ns-resolve]}}}}}
