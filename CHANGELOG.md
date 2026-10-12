@@ -9,6 +9,7 @@
 ### New features
 
 - `:force-interrupt` config key (default true): set it to false to stop `interrupt` from force-stopping an eval thread that ignores the interrupt.
+- `describe` reports the host under `:aux {:host {:name "jvm" :can-stop-threads "true"|"false"}}`; `:can-stop-threads` tells a client whether `interrupt` can force-stop a runaway eval. The flag is a string because bencode cannot carry booleans.
 - `nrepl.util.out/unwrap-standard-streams` undoes `wrap-standard-streams`: it restores the original `System/out`, `System/err` and root `*out*` / `*err*`, and keeps registered callbacks for a later re-wrap.
 
 ### Changes
