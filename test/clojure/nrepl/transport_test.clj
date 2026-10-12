@@ -191,6 +191,7 @@
       (is (= {:n 1} (sut/recv transport 2000)))
       (Thread/sleep 200)
       (.close ^Closeable transport)
+      (Thread/sleep 200)
       (is (nil? (sut/recv transport 300)))
       (is (= 2 @calls))))
 
