@@ -515,6 +515,11 @@ The following keys are recognized in `.nrepl.edn` and `~/.nrepl/nrepl.edn`:
 | `true`
 | Whether to load the native JVMTI agent for thread stopping on Java 21+. See xref:installation.adoc#jvmti[JVMTI agent].
 
+| :force-interrupt
+| boolean
+| `true`
+| Whether `interrupt` force-stops an eval thread that is still running 5 seconds after it was interrupted. Set to `false` to only interrupt the thread and never stop it forcibly.
+
 | :repl-fn
 | symbol
 | —

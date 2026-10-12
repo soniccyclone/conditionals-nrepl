@@ -74,7 +74,7 @@
       ;; there was a TLS exception, e.g. bad client cert, skip the error but
       ;; continue the loop.
       (when-not (= sock :tls-exception)
-        (threading/run-with @threading/handle-executor
+        (threading/run-with @threading/connection-executor
           (log-exceptions
            (let [transport (transport sock)]
              (try

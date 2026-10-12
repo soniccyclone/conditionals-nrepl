@@ -6,6 +6,15 @@
 
 ## master (unreleased)
 
+### New features
+
+- `:force-interrupt` config key (default true): set it to false to stop `interrupt` from force-stopping an eval thread that ignores the interrupt.
+
+### Changes
+
+- **(Breaking)** Removed `nrepl.util.threading/thread-reaper-executor`; the forced-stop reaper is now private to the threading implementation.
+- Per-connection loops now run on `nREPL-connection-N` threads, and the stdout/stderr callbacks of `wrap-standard-streams` now run on `nREPL-handler-N` threads instead of `nREPL-transport-N`.
+
 ### Bugs fixed
 
 - Non-ASCII `:out` chunks were mangled on JVMs with a non-UTF-8 default charset.

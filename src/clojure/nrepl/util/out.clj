@@ -49,7 +49,7 @@
   "Run all registered callbacks for the given stream (`:out` or `:err`). Each
   callback should be run in a separate thread to prevent stalling and errors."
   [stream s]
-  (run! #(threading/run-with @threading/transport-executor
+  (run! #(threading/run-with @threading/handle-executor
            (% s))
         (vals (get @callbacks stream))))
 

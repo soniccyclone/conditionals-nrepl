@@ -11,10 +11,10 @@
    [nrepl.middleware :refer [set-descriptor!]]
    [nrepl.middleware.caught :as caught]
    [nrepl.middleware.print :as print]
-   [nrepl.transport :as t])
+   [nrepl.transport :as t]
+   [nrepl.util.threading :as threading])
   (:import
-   (clojure.lang Compiler$CompilerException
-                 LineNumberingPushbackReader LispReader$ReaderException)
+   (clojure.lang LineNumberingPushbackReader LispReader$ReaderException)
    (java.io PushbackReader StringReader Writer)
    (java.lang.reflect Field)))
 
@@ -42,13 +42,6 @@
     (when line (set-line! reader (int line)))
     (when column (set-column! reader (int column)))
     reader))
-
-(defn- interrupted?
-  "Returns true if the given throwable was ultimately caused by an interrupt."
-  [^Throwable e]
-  (or (instance? ThreadDeath (clojure.main/root-cause e))
-      (and (instance? Compiler$CompilerException e)
-           (instance? ThreadDeath (ex-cause e)))))
 
 (defn- short-file-name [source-path]
   (try (.getName (io/file source-path))
@@ -117,7 +110,7 @@
           caught (fn [^Throwable e]
                    (set! *e e)
                    (vreset! errored? true)
-                   (when-not (interrupted? e)
+                   (when-not (threading/stop-exception? e)
                      (t/respond-to msg {::caught/throwable e
                                         :status #{:eval-error}
                                         :ex (str (class e))

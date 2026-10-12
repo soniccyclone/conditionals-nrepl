@@ -1,10 +1,11 @@
 (ns nrepl.transport-test
   (:require [nrepl.socket :as socket]
             [nrepl.transport :as sut]
+            [nrepl.util.threading :as threading]
             [clojure.test :refer [deftest testing is]])
   (:import (java.io BufferedInputStream BufferedOutputStream
                     ByteArrayInputStream ByteArrayOutputStream
-                    IOException InputStream)
+                    Closeable IOException InputStream)
            (java.net InetAddress ServerSocket Socket)
            (java.nio.channels ClosedChannelException)))
 
@@ -129,3 +130,90 @@
                :status #{:explode-error :error :done}
                :message (ex-message e)}]
              @sent)))))
+
+(defn- fn-transport-of
+  [transport-read]
+  (sut/fn-transport transport-read (fn [_]) (fn [])))
+
+(deftest rendezvous-backpressure
+  (testing "the reader loop reads ahead by nothing: one read per received message"
+    (let [calls (atom 0)
+          transport (fn-transport-of #(hash-map :n (swap! calls inc)))]
+      (try
+        (Thread/sleep 200)
+        (is (= 1 @calls))
+        (is (= {:n 1} (sut/recv transport 2000)))
+        (Thread/sleep 200)
+        (is (= 2 @calls))
+        (finally
+          (.close ^Closeable transport))))))
+
+(deftest recv-timeout-keeps-the-message
+  (testing "a recv that times out does not lose the message read in the meantime"
+    (let [calls (atom 0)
+          transport (fn-transport-of (fn []
+                                       (if (= 1 (swap! calls inc))
+                                         (do (Thread/sleep 300) {:n 1})
+                                         (Thread/sleep 60000))))]
+      (try
+        (is (nil? (sut/recv transport 50)))
+        (is (= {:n 1} (sut/recv transport 5000)))
+        (finally
+          (.close ^Closeable transport))))))
+
+(deftest reader-failure-is-sticky
+  (testing "a failing read is rethrown by every recv"
+    (let [failure (ex-info "boom" {})
+          transport (fn-transport-of #(throw failure))]
+      (try
+        (is (identical? failure (try (sut/recv transport 2000) (catch Throwable e e))))
+        (is (identical? failure (try (sut/recv transport 2000) (catch Throwable e e))))
+        (finally
+          (.close ^Closeable transport)))))
+
+  (testing "the reader loop does not read again after a failure"
+    (let [counters (repeatedly 200 #(atom 0))
+          transports (mapv (fn [calls]
+                             (fn-transport-of #(do (swap! calls inc)
+                                                   (throw (ex-info "boom" {})))))
+                           counters)]
+      (try
+        (run! #(try (sut/recv % 2000) (catch Throwable _)) transports)
+        (Thread/sleep 200)
+        (is (= (repeat 200 1) (map deref counters)))
+        (finally
+          (run! #(.close ^Closeable %) transports))))))
+
+(deftest close-stops-the-reader-loop
+  (testing "closing drops a message the reader loop is blocked on handing over"
+    (let [calls (atom 0)
+          transport (fn-transport-of #(hash-map :n (swap! calls inc)))]
+      (is (= {:n 1} (sut/recv transport 2000)))
+      (Thread/sleep 200)
+      (.close ^Closeable transport)
+      (is (nil? (sut/recv transport 300)))
+      (is (= 2 @calls))))
+
+  (testing "closing interrupts a reader loop that is blocked in the read"
+    (let [interrupted (promise)
+          calls (atom 0)
+          transport (fn-transport-of (fn []
+                                       (swap! calls inc)
+                                       (try (Thread/sleep 60000)
+                                            (catch InterruptedException e
+                                              (deliver interrupted true)
+                                              (throw e)))))]
+      (Thread/sleep 100)
+      (.close ^Closeable transport)
+      (is (true? (deref interrupted 2000 false)))
+      (Thread/sleep 300)
+      (is (= 1 @calls)))))
+
+(deftest infinite-timeout-is-accepted
+  (testing "recv accepts the infinite timeout, with and without an argument"
+    (let [transport (fn-transport-of #(do (Thread/sleep 100) {:n 1}))]
+      (try
+        (is (= {:n 1} (sut/recv transport threading/infinite-ms)))
+        (is (= {:n 1} (sut/recv transport)))
+        (finally
+          (.close ^Closeable transport))))))

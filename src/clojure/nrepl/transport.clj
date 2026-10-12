@@ -28,7 +28,7 @@
             EOFException
             Flushable
             PushbackInputStream)
-   [java.util.concurrent BlockingQueue LinkedBlockingQueue Semaphore SynchronousQueue TimeUnit]))
+   (java.util.concurrent Semaphore)))
 
 (defprotocol Transport
   "Defines the interface for a wire protocol implementation for use
@@ -42,7 +42,7 @@
 (deftype FnTransport [recv-fn send-fn close]
   Transport
   (send [this msg] (send-fn msg) this)
-  (recv [this] (.recv this Long/MAX_VALUE))
+  (recv [this] (.recv this threading/infinite-ms))
   (recv [_this timeout] (recv-fn timeout))
   java.io.Closeable
   (close [_this] (close)))
@@ -52,29 +52,29 @@
    to the 2 or 3 functions provided."
   ([transport-read write] (fn-transport transport-read write nil))
   ([transport-read write close]
-   (let [read-queue (SynchronousQueue.)
+   (let [read-queue (threading/make-rendezvous)
+         stop (volatile! false)
          fut (threading/run-with @threading/transport-executor
-               (while (not (Thread/interrupted))
+               (while (not (or @stop (threading/cancelled?)))
                  (try
-                   (.put read-queue (transport-read))
+                   (threading/put! read-queue (transport-read))
                    (catch InterruptedException _
-                     ;; Interrupted flag will end the loop.
-                     (.put read-queue nil))
+                     (vreset! stop true))
                    (catch Throwable t
-                     (.put read-queue t)
-                     (.interrupt (Thread/currentThread))))))]
+                     (vreset! stop true)
+                     (threading/put! read-queue t)))))]
      (FnTransport.
       (let [failure (atom nil)]
         #(if @failure
            (throw @failure)
-           (let [msg (.poll read-queue % TimeUnit/MILLISECONDS)]
+           (let [msg (threading/poll! read-queue %)]
              (if (instance? Throwable msg)
                (do (reset! failure msg)
-                   (.cancel fut true)
+                   (threading/cancel! fut)
                    (throw msg))
                msg))))
       write
-      (fn [] (close) (.cancel fut true))))))
+      (fn [] (close) (threading/cancel! fut))))))
 
 (defmulti ^:private <bytes class)
 
@@ -181,8 +181,8 @@
          read-sync (Semaphore. 1)
          eval-ids (atom #{})
          session-id (atom nil)
-         read-queue (LinkedBlockingQueue.)
-         read #(or (.poll read-queue)
+         read-queue (threading/make-queue)
+         read #(or (threading/poll! read-queue)
                    (let [id (str "eval" (uuid))]
                      (.acquire read-sync)
                      (swap! eval-ids conj id)
@@ -198,9 +198,9 @@
                    (.release read-sync))
                  (.flush w))
          close (when s
-                 #(do (.put read-queue {:op "close", :session @session-id})
+                 #(do (threading/put! read-queue {:op "close", :session @session-id})
                       (.close s)))]
-     (.put read-queue {:op "clone"})
+     (threading/put! read-queue {:op "clone"})
      (fn-transport read write close))))
 
 (defn tty-greeting
@@ -232,17 +232,17 @@
   (printf "WARNING: No uri scheme associated with transport %s\n" transport)
   "unknown")
 
-(deftype QueueTransport [^BlockingQueue in ^BlockingQueue out]
+(deftype QueueTransport [in out]
   nrepl.transport.Transport
-  (send [this msg] (.put out msg) this)
-  (recv [_this] (.take in))
-  (recv [_this timeout] (.poll in timeout TimeUnit/MILLISECONDS)))
+  (send [this msg] (threading/put! out msg) this)
+  (recv [_this] (threading/take! in))
+  (recv [_this timeout] (threading/poll! in timeout)))
 
 (defn piped-transports
   "Returns a pair of Transports that read from and write to each other."
   []
-  (let [a (LinkedBlockingQueue.)
-        b (LinkedBlockingQueue.)]
+  (let [a (threading/make-queue)
+        b (threading/make-queue)]
     [(QueueTransport. a b) (QueueTransport. b a)]))
 
 (defn respond-to
