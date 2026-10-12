@@ -23,6 +23,42 @@
 
 ;; compliment/utils.clj
 
+(defn- starts-with?
+  [^String s ^String prefix]
+  (str/starts-with? s prefix))
+
+(defn- ends-with?
+  [^String s ^String suffix]
+  (str/ends-with? s suffix))
+
+(defn- includes?
+  [^String s ^String part]
+  (str/includes? s part))
+
+(defn- index-of
+  [^String s ^String part]
+  (or (str/index-of s part) -1))
+
+(defn- last-index-of
+  [^String s ^String part]
+  (or (str/last-index-of s part) -1))
+
+(defn- str-len
+  ^long [^String s]
+  (.length s))
+
+(defn- char-at
+  [^String s ^long i]
+  (.charAt s i))
+
+(defn- upper-case-char?
+  [c]
+  (Character/isUpperCase ^char c))
+
+(defn- ordinal-compare
+  [a b]
+  (compare a b))
+
 (def ^{:dynamic true} *extra-metadata*
   "Signals to downstream sources which additional information about completion\n  candidates they should attach. Should be a set of keywords."
   nil)
@@ -30,25 +66,27 @@
 (defn split-by-leading-literals
   "Separate quote/var/deref qualifiers from a var name."
   [symbol-str]
-  (next (re-matches #"(@{0,2}#'|'|@)?(.*)" symbol-str)))
+  (some-> (re-matches #"(@{0,2}#'|'|@)?(.*)" symbol-str)
+          (update 1 not-empty)
+          next))
 
 (set! *unchecked-math* true)
 
 (defn fuzzy-matches?
   "Tests if symbol matches the prefix when symbol is split into parts on\n  separator."
-  [^String prefix ^String symbol ^Character separator]
-  (let [pn (.length prefix)
-        sn (.length symbol)]
+  [^String prefix ^String symbol separator]
+  (let [pn (str-len prefix)
+        sn (str-len symbol)]
     (cond (zero? pn) true
           (zero? sn) false
-          (not (= (.charAt prefix 0) (.charAt symbol 0))) false
+          (not (= (char-at prefix 0) (char-at symbol 0))) false
           :else (loop [pi 1
                        si 1
                        skipping false]
                   (cond (>= pi pn) true
                         (>= si sn) false
-                        :else (let [pc (.charAt prefix pi)
-                                    sc (.charAt symbol si)
+                        :else (let [pc (char-at prefix pi)
+                                    sc (char-at symbol si)
                                     match (= pc sc)]
                                 (cond (= sc separator)
                                       (recur (if match (inc pi) pi) (inc si) false)
@@ -58,18 +96,18 @@
 (defn fuzzy-matches-no-skip?
   "Tests if symbol matches the prefix where separator? checks whether character\n  is a separator. Unlike `fuzzy-matches?` requires separator characters to be\n  present in prefix."
   [^String prefix ^String symbol separator?]
-  (let [pn (.length prefix)
-        sn (.length symbol)]
+  (let [pn (str-len prefix)
+        sn (str-len symbol)]
     (cond (zero? pn) true
           (zero? sn) false
-          (not (= (.charAt prefix 0) (.charAt symbol 0))) false
+          (not (= (char-at prefix 0) (char-at symbol 0))) false
           :else (loop [pi 1
                        si 1
                        skipping false]
                   (cond (>= pi pn) true
                         (>= si sn) false
-                        :else (let [pc (.charAt prefix pi)
-                                    sc (.charAt symbol si)]
+                        :else (let [pc (char-at prefix pi)
+                                    sc (char-at symbol si)]
                                 (cond skipping (if (separator? sc)
                                                  (recur pi si false)
                                                  (recur pi (inc si) true))
@@ -189,13 +227,13 @@
   (let [roots (volatile! #{})
         filename->classname
         (fn [^String file]
-          (when (.endsWith file ".class")
-            (when-not (or (.contains file "__")
-                          (.contains file "$")
-                          (.equals file "module-info.class"))
-              (let [c (-> (subs file 0 (- (.length file) 6))
-                          (.replace "/" "."))]
-                (vswap! roots conj (subs c 0 (max (.indexOf ^String c ".") 0)))
+          (when (ends-with? file ".class")
+            (when-not (or (includes? file "__")
+                          (includes? file "$")
+                          (= file "module-info.class"))
+              (let [c (-> (subs file 0 (- (str-len file) 6))
+                          (str/replace "/" "."))]
+                (vswap! roots conj (subs c 0 (max (index-of c ".") 0)))
                 c))))
         classes (into [] (keep filename->classname) files)
         roots (set (remove empty? @roots))]
@@ -205,12 +243,12 @@
   [files]
   (into []
         (keep (fn [^String file]
-                (when (or (.endsWith file ".clj")
-                          (.endsWith file ".cljs")
-                          (.endsWith file ".cljc"))
-                  (let [ns-str (.. (subs file 0 (.lastIndexOf file "."))
-                                   (replace "/" ".")
-                                   (replace "_" "-"))]
+                (when (or (ends-with? file ".clj")
+                          (ends-with? file ".cljs")
+                          (ends-with? file ".cljc"))
+                  (let [ns-str (-> (subs file 0 (last-index-of file "."))
+                                   (str/replace "/" ".")
+                                   (str/replace "_" "-"))]
                     {:ns-str ns-str, :file file}))))
         files))
 
@@ -365,7 +403,7 @@
 (defn camel-case-matches?
   "Tests if prefix matches the member name following camel case rules.\n  Thus, prefix `getDeF` matches member `getDeclaredFields`."
   [prefix member-name]
-  (fuzzy-matches-no-skip? prefix member-name (fn [ch] (Character/isUpperCase ^char ch))))
+  (fuzzy-matches-no-skip? prefix member-name upper-case-char?))
 
 (defn members-candidates
   "Returns a list of Java non-static fields and methods candidates."
@@ -382,7 +420,7 @@
                                     (get-all-members ns))
             :when (and (if inparts?
                          (camel-case-matches? prefix member-name)
-                         (.startsWith ^String member-name prefix))
+                         (starts-with? member-name prefix))
                        (if exact-class?
                          (some (:types (meta members)) [:method :field])
                          true))]
@@ -409,7 +447,7 @@
               :let [types (:types (meta members))]
               :when (and (if inparts?
                            (camel-case-matches? member-prefix member-name)
-                           (.startsWith member-name member-prefix))
+                           (starts-with? member-name member-prefix))
                          (or (some #{:static-method :static-field} types)
                              (and (clojure-1-12+?) (:constructor types))))]
           {:candidate (str cl-name "/" member-name),
@@ -427,7 +465,7 @@
 (defn nscl-symbol?
   "Tests if prefix looks like a namespace or classname."
   [^String x]
-  (and (re-matches #"[^\/\:]+" x) (not (= (.charAt x 0) \.))))
+  (and (re-matches #"[^\/\:]+" x) (not (= (char-at x 0) \.))))
 
 (defn nscl-matches?
   "Tests if prefix partially matches a namespace or classname with periods as\n  separators."
@@ -438,14 +476,14 @@
   "Return a list of namespace candidates."
   [^String prefix ns context]
   (when (nscl-symbol? prefix)
-    (let [has-dot (> (.indexOf prefix ".") -1)
+    (let [has-dot (> (index-of prefix ".") -1)
           [literals prefix] (split-by-leading-literals prefix)
           cands-from-cp
           (for [{:keys [^String ns-str file]} (namespaces&files-on-classpath)
                 :when (and (re-find #"\.cljc?$" file)
                            (if has-dot
                              (nscl-matches? prefix ns-str)
-                             (.startsWith ns-str prefix)))]
+                             (starts-with? ns-str prefix)))]
             {:candidate (str literals ns-str), :type :namespace, :file file, :priority 0})
           ns-names (set (map :candidate cands-from-cp))
           ns-sym->cand
@@ -465,15 +503,15 @@
   []
   (with-classpath-cache :all-classes-short-names
     (group-by (fn [^String s]
-                (.substring s (inc (.lastIndexOf s "."))))
+                (subs s (inc (last-index-of s "."))))
               (classes-on-classpath))))
 
 (defn- get-classes-by-package-name
   "Returns simple classnames that match the `prefix` and belong to `pkg-name`."
   [prefix pkg-name]
   (reduce-kv (fn [l ^String short-name full-names]
-               (if (and (.startsWith short-name prefix)
-                        (some (fn [^String fn] (.startsWith fn pkg-name)) full-names))
+               (if (and (starts-with? short-name prefix)
+                        (some (fn [^String fn] (starts-with? fn pkg-name)) full-names))
                  (conj l {:candidate short-name, :type :class})
                  l))
              []
@@ -485,7 +523,7 @@
   (when (nscl-symbol? prefix)
     (if-let [import-ctx (get {} :nil)]
       (get-classes-by-package-name prefix import-ctx)
-      (let [has-dot (.contains prefix ".")
+      (let [has-dot (includes? prefix ".")
             seen (HashSet.)
             include? (fn
                        ([class-str remember?]
@@ -494,7 +532,6 @@
                           true)))
             str->cand (fn [s fqname] {:candidate s, :type :class, :priority 0})
             all-classes (classes-on-classpath)
-            it (.iterator ^Iterable all-classes)
             roots (root-packages-on-classpath)]
         (as-> (transient []) result
           (reduce-kv (fn [result _ ^Class v]
@@ -513,9 +550,9 @@
                          result))
                      result
                      (ns-map ns))
-          (if (Character/isUpperCase (.charAt prefix 0))
+          (if (upper-case-char? (char-at prefix 0))
             (reduce-kv (fn [result ^String short-name full-names]
-                         (if (.startsWith short-name prefix)
+                         (if (starts-with? short-name prefix)
                            (reduce (fn [result cl]
                                      (cond-> result
                                        (include? cl true) (conj! (str->cand cl cl))))
@@ -526,17 +563,19 @@
                        (all-classes-short-names))
             result)
           (if (or has-dot (contains? roots prefix))
-            (loop [result result]
-              (if (.hasNext it)
-                (let [^String cl (.next it)]
+            (loop [result result
+                   classes (seq all-classes)]
+              (if classes
+                (let [^String cl (first classes)]
                   (recur (cond-> result
-                           (and (.startsWith cl prefix) (include? cl false))
-                           (conj! (str->cand cl cl)))))
+                           (and (starts-with? cl prefix) (include? cl false))
+                           (conj! (str->cand cl cl)))
+                         (next classes)))
                 result))
             (reduce conj!
                     result
                     (for [^String root-pkg roots
-                          :when (and (.startsWith root-pkg prefix)
+                          :when (and (starts-with? root-pkg prefix)
                                      (include? root-pkg false))]
                       (str->cand (str root-pkg ".") ""))))
           (persistent! result))))))
@@ -548,7 +587,8 @@
 (defn var-symbol?
   "Test if prefix resembles a var name."
   [x]
-  (re-matches #"(?:([^\/\:][^\/]*)\/)?(|[^/:][^/]*)" x))
+  (some-> (re-matches #"(?:([^\/\:][^\/]*)\/)?(|[^/:][^/]*)" x)
+          (update 1 not-empty)))
 
 (defn dash-matches?
   "Tests if prefix partially matches a var name with dashes as\n  separators."
@@ -605,7 +645,7 @@
         ns-name (str ns)]
     (for [[kw _] @keywords-table
           :when (= (namespace kw) ns-name)
-          :when (.startsWith (name kw) prefix)]
+          :when (starts-with? (name kw) prefix)]
       (tagged-candidate (str "::" (name kw))))))
 
 (defn namespace-alias-candidates
@@ -614,7 +654,7 @@
   (let [prefix (subs prefix 2)]
     (for [[alias _] (ns-aliases ns)
           :let [aname (name alias)]
-          :when (.startsWith aname prefix)]
+          :when (starts-with? aname prefix)]
       (tagged-candidate (str "::" aname "/")))))
 
 (defn aliased-candidates
@@ -624,20 +664,20 @@
     (let [alias-ns-name (str (resolve-namespace (symbol alias) ns))]
       (for [[kw _] @keywords-table
             :when (= (namespace kw) alias-ns-name)
-            :when (.startsWith (name kw) prefix)]
+            :when (starts-with? (name kw) prefix)]
         (tagged-candidate (str "::" alias "/" (name kw)))))))
 
 (defn keyword-candidates
   [^String prefix ns _]
-  (let [single-colon? (.startsWith prefix ":")
-        double-colon? (.startsWith prefix "::")
-        has-slash? (> (.indexOf prefix "/") -1)]
+  (let [single-colon? (starts-with? prefix ":")
+        double-colon? (starts-with? prefix "::")
+        has-slash? (> (index-of prefix "/") -1)]
     (cond (and double-colon? has-slash?) (aliased-candidates prefix ns)
           double-colon? (concat (qualified-candidates prefix ns)
                                 (namespace-alias-candidates prefix ns))
           single-colon? (let [prefix (subs prefix 1)]
                           (for [[kw _] @keywords-table
-                                :when (.startsWith (str kw) prefix)]
+                                :when (starts-with? (str kw) prefix)]
                             (tagged-candidate (str ":" kw)))))))
 
 (defsource :compliment.lite/keywords :candidates #'keyword-candidates)
@@ -679,4 +719,4 @@
                              (all-sources))
          candidates
          (into [] (comp (map (fn [f] (f prefix nspc nil))) cat) candidate-fns)]
-     (sort-by :candidate candidates))))
+     (sort-by :candidate ordinal-compare candidates))))

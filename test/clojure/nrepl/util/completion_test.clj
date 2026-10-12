@@ -9,6 +9,10 @@
 (def t-var "var" nil)
 (defn t-fn "fn" [x] x)
 (defmacro t-macro "macro" [y] y)
+(def t-ord-Zed nil)
+(def t-ord-alpha nil)
+(def t-ord-Beta nil)
+(def t-ord-gamma nil)
 
 (defn- candidates
   "Return only the candidate names without any additional
@@ -102,6 +106,18 @@
          (completions "File/" 'nrepl.util.completion))
     (is+ (mc/embeds [{:candidate ".toString" :type :method}])
          (completions ".toString" 'clojure.core))))
+
+(deftest default-package-class-completion-test
+  (with-redefs [completion/primitive-cache (atom {})
+                completion/classes-on-classpath (fn [] ["DefaultPkgClass" "a.b.Other"])
+                completion/root-packages-on-classpath (fn [] #{"a"})
+                completion/namespaces&files-on-classpath (fn [] [])]
+    (is+ (mc/embeds [{:candidate "DefaultPkgClass" :type :class}])
+         (completions "DefaultPkg" 'nrepl.util.completion-test))))
+
+(deftest candidate-order-test
+  (is+ ["t-ord-Beta" "t-ord-Zed" "t-ord-alpha" "t-ord-gamma"]
+       (candidates "t-ord" 'nrepl.util.completion-test)))
 
 (deftest keyword-completions-test
   (testing "colon prefix"
