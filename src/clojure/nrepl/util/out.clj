@@ -4,6 +4,7 @@
    :author "Oleksandr Yakushev"}
   (:require [nrepl.util.threading :as threading])
   (:import (java.io OutputStreamWriter PrintStream PrintWriter)
+           (java.nio.charset StandardCharsets)
            (nrepl.out CallbackBufferedOutputStream TeeOutputStream)))
 
 ;;;; State management
@@ -91,8 +92,8 @@
         ;; binding. These root writers don't have their own callback-invoking
         ;; logic, they just write into the wrapped streams that we constructed
         ;; before.
-        (.bindRoot #'*out* (PrintWriter. (OutputStreamWriter. new-out)))
-        (.bindRoot #'*err* (PrintWriter. (OutputStreamWriter. new-err)))
+        (.bindRoot #'*out* (PrintWriter. (OutputStreamWriter. ^PrintStream new-out StandardCharsets/UTF_8)))
+        (.bindRoot #'*err* (PrintWriter. (OutputStreamWriter. ^PrintStream new-err StandardCharsets/UTF_8)))
         ;; Let's also rebind clojure.test/*test-out* because it captures *out*
         ;; during load time. If the var doesn't resolve, it means clojure.test
         ;; hasn't loaded yet, and we don't need to rebind it.

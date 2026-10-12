@@ -6,6 +6,10 @@
 
 ## master (unreleased)
 
+### Bugs fixed
+
+- Non-ASCII `:out` chunks were mangled on JVMs with a non-UTF-8 default charset.
+
 ## 1.8.0 (2026-10-02)
 
 ### New features

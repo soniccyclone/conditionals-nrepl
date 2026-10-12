@@ -1,7 +1,7 @@
 (ns nrepl.util.out-test
   (:require [clojure.test :refer :all]
             [clojure.string :as str]
-            [nrepl.test-helpers :refer [is+ newline->sys]]
+            [nrepl.test-helpers :refer [eval-in-jvm is+ newline->sys]]
             [nrepl.util.out :as out])
   (:import nrepl.out.CallbackBufferedOutputStream))
 
@@ -109,3 +109,19 @@
       (.flush stream)
       (is (str/ends-with? (last @chunks) "☀") (str @chunks))
       (is (every? #{\- \☀} (apply str @chunks)) (str @chunks)))))
+
+(def ^:private e-acute-roundtrip-code
+  "(require 'nrepl.util.out)
+   (let [got (promise)]
+     (nrepl.util.out/wrap-standard-streams)
+     (nrepl.util.out/set-callback :out :test #(deliver got %))
+     (.write *out* (str (char 0xe9)))
+     (.flush *out*)
+     (println \"RESULT\" (pr-str (mapv int (deref got 10000 \"\"))))
+     (shutdown-agents))")
+
+(deftest wrapped-standard-streams-encode-utf-8-regardless-of-default-charset
+  (let [{:keys [out]} (eval-in-jvm {"file.encoding" "ISO-8859-1"}
+                                   e-acute-roundtrip-code 120000)]
+    (is (= [0xe9] (some->> out (re-find #"RESULT (\[[0-9 ]*\])") second read-string))
+        out)))

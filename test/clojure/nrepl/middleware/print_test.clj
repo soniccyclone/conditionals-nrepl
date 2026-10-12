@@ -12,7 +12,7 @@
             [matcher-combinators.matchers :as mc]
             [nrepl.core :refer [combine-responses]]
             [nrepl.middleware.print :as print]
-            [nrepl.test-helpers :refer [is+]]
+            [nrepl.test-helpers :refer [eval-in-jvm is+]]
             [nrepl.transport :as t])
   (:import [java.io Writer]))
 
@@ -244,3 +244,20 @@
                     ;; of replying-PrintWriter.
                     ::print/stream?     1
                     ::print/buffer-size 100000})))))
+
+(def ^:private e-acute-roundtrip-code
+  "(require 'nrepl.middleware.print 'nrepl.transport)
+   (let [got (atom [])
+         transport (nrepl.transport/fn-transport nil #(swap! got conj %))
+         w (nrepl.middleware.print/replying-PrintWriter
+            :out {:transport transport} {})]
+     (.write w (str (char 0xe9)))
+     (.flush w)
+     (println \"RESULT\" (pr-str (mapv int (apply str (map :out @got)))))
+     (shutdown-agents))")
+
+(deftest replying-print-writer-encodes-utf-8-regardless-of-default-charset
+  (let [{:keys [out]} (eval-in-jvm {"file.encoding" "ISO-8859-1"}
+                                   e-acute-roundtrip-code 120000)]
+    (is (= [0xe9] (some->> out (re-find #"RESULT (\[[0-9 ]*\])") second read-string))
+        out)))

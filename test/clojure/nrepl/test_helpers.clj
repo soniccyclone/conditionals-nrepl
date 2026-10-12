@@ -5,7 +5,8 @@
             [matcher-combinators.test])
   (:import (com.hypirion.io ClosingPipe Pipe)
            (java.io File)
-           (java.net ServerSocket)))
+           (java.net ServerSocket)
+           (java.util.concurrent TimeUnit)))
 
 (def sys-newline
   "The system's newline character sequence."
@@ -55,6 +56,22 @@
                     _pump-in (ClosingPipe. System/in in)]
                 (.waitFor proc))))
     proc))
+
+(defn eval-in-jvm
+  [props code timeout-ms]
+  (let [java (str (System/getProperty "java.home") File/separator "bin" File/separator "java")
+        cmd  (concat [java]
+                     (map (fn [[k v]] (str "-D" k "=" v)) props)
+                     ["-cp" (System/getProperty "java.class.path")
+                      "clojure.main" "-e" code])
+        proc (-> (ProcessBuilder. ^java.util.List (vec cmd))
+                 (.redirectErrorStream true)
+                 (.start))
+        out  (future (slurp (.getInputStream proc)))]
+    (if (.waitFor proc timeout-ms TimeUnit/MILLISECONDS)
+      {:exit (.exitValue proc), :out @out}
+      (do (.destroyForcibly proc)
+          {:exit nil, :out (deref out 1000 "")}))))
 
 (defmacro with-process [[binding cmd-vector] & body]
   (let [sym (gensym)]

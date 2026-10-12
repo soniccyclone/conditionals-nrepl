@@ -11,6 +11,7 @@
   (:import
    (clojure.lang RT)
    (java.io OutputStreamWriter PrintWriter StringWriter Writer)
+   (java.nio.charset StandardCharsets)
    (nrepl.out CallbackBufferedOutputStream QuotaBoundWriter QuotaExceeded)
    (nrepl.transport Transport)))
 
@@ -64,7 +65,7 @@
   [key msg {:keys [::buffer-size ::quota]}]
   (-> (CallbackBufferedOutputStream. #(transport/respond-to msg key %)
                                      (or buffer-size 1024))
-      (OutputStreamWriter.)
+      (OutputStreamWriter. StandardCharsets/UTF_8)
       (with-quota-bound-writer quota)
       (PrintWriter. true)))
 
