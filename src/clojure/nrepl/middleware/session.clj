@@ -9,10 +9,10 @@
    [nrepl.middleware.print :as print]
    [nrepl.misc :as misc :refer [uuid response-for log]]
    [nrepl.transport :as t]
+   [nrepl.util.io :as io]
    [nrepl.util.threading :as threading])
   (:import
-   (clojure.lang Compiler LineNumberingPushbackReader)
-   (nrepl.in QueuePollingReader)))
+   (clojure.lang Compiler)))
 
 (def ^:private sessions (atom {}))
 
@@ -39,14 +39,14 @@
   (delay (threading/make-executor {:name-fmt "nREPL-ephemeral-session-%d"})))
 
 (defn- session-in
-  "Returns a QueuePollingReader (that is suitable for binding to *in* when
-  wrapped into LineNumberingPushbackReader). When something attempts to read
+  "Returns a stdin reader (that is suitable for binding to *in* when
+  wrapped into a line-numbering reader). When something attempts to read
   from it, it will (if empty) send a {:status :need-input} message on the
   provided transport so the client/user can provide content to be read."
   [session-id transport]
-  (QueuePollingReader. #(t/send transport
-                                (response-for *msg* :session session-id
-                                              :status :need-input))))
+  (io/stdin-reader #(t/send transport
+                            (response-for *msg* :session session-id
+                                          :status :need-input))))
 
 (let [state (atom {})]
   (defn- dynvar-defaults-from-config []
@@ -166,7 +166,7 @@
          new-session (atom (assoc (if session
                                     @session
                                     (gather-initial-bindings msg))
-                                  #'*in* (LineNumberingPushbackReader. qpr)
+                                  #'*in* (io/line-numbering-reader qpr)
                                   #'*ns* (create-ns 'user))
                            :meta {:id id
                                   :out-limit (or out-limit (:out-limit (meta session)))
@@ -387,10 +387,10 @@
   [h]
   (fn [{:keys [op stdin session] :as msg}]
     (if (= op "stdin")
-      (let [^QueuePollingReader qpr (::queue-reader (meta session))]
+      (let [qpr (::queue-reader (meta session))]
         (if (empty? stdin)
-          (.addEof qpr)
-          (.addInput qpr stdin))
+          (io/add-eof! qpr)
+          (io/add-input! qpr stdin))
         (t/respond-to msg :status :done))
       (h msg))))
 

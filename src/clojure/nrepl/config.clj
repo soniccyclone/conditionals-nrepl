@@ -13,7 +13,8 @@
   (:require
    [clojure.edn :as edn]
    [clojure.java.io :as io]
-   [clojure.string :as str]))
+   [clojure.string :as str]
+   [nrepl.util.io :as nio]))
 
 (def ^:private home-dir
   "The user's home directory."
@@ -62,8 +63,8 @@
 (defn- load-edn
   "Load edn from an io/reader source (filename or io/resource)."
   [source]
-  (with-open [r (io/reader source)]
-    (edn/read (java.io.PushbackReader. r))))
+  (with-open [^java.io.Reader r (nio/text-reader source)]
+    (edn/read (nio/pushback-reader r))))
 
 (defn- load-config
   "Load the configuration file identified by `file`.

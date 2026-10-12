@@ -2,10 +2,8 @@
   "Utilities for injecting output-intercepting writers for System.out and err."
   {:added "1.5"
    :author "Oleksandr Yakushev"}
-  (:require [nrepl.util.threading :as threading])
-  (:import (java.io OutputStreamWriter PrintStream PrintWriter)
-           (java.nio.charset StandardCharsets)
-           (nrepl.out CallbackBufferedOutputStream TeeOutputStream)))
+  (:require [nrepl.util.io :as io]
+            [nrepl.util.threading :as threading]))
 
 ;;;; State management
 
@@ -24,7 +22,7 @@
     (when (empty? og-streams)
       ;; Only need to try once, if another thread sets then we are good.
       (compare-and-set! original-print-streams og-streams
-                        {:out System/out, :err System/err}))))
+                        (io/system-writers)))))
 
 (defn set-callback
   "Register or update a callback that is invoked when output is written to stream.
@@ -71,9 +69,7 @@
   all threads and code running in the same JVM process."
   []
   (letfn [(wrap-stream [stream callback]
-            (PrintStream.
-             (TeeOutputStream. stream
-                               (CallbackBufferedOutputStream. callback 1024))))]
+            (io/tee-writer stream callback))]
     (when-not @wrapped?
       (reset! wrapped? true)
       (capture-original-print-streams)
@@ -83,8 +79,7 @@
             new-err (wrap-stream err (fn global-err-callback [s]
                                        (run-stream-callbacks :err s)))]
         ;; Replace stdout/stderr with wrapped versions. This is a global change.
-        (System/setOut new-out)
-        (System/setErr new-err)
+        (io/install-system-writers! new-out new-err)
         ;; Also, replace global (root) *out* and *err* bindings. While we take
         ;; care of proper *out*/*err* bindings within the evaluation context (in
         ;; threads that run within the nREPL "session"), threads that spawn
@@ -92,10 +87,10 @@
         ;; binding. These root writers don't have their own callback-invoking
         ;; logic, they just write into the wrapped streams that we constructed
         ;; before.
-        (.bindRoot #'*out* (PrintWriter. (OutputStreamWriter. ^PrintStream new-out StandardCharsets/UTF_8)))
-        (.bindRoot #'*err* (PrintWriter. (OutputStreamWriter. ^PrintStream new-err StandardCharsets/UTF_8)))
+        (alter-var-root #'*out* (constantly (io/root-writer new-out)))
+        (alter-var-root #'*err* (constantly (io/root-writer new-err)))
         ;; Let's also rebind clojure.test/*test-out* because it captures *out*
         ;; during load time. If the var doesn't resolve, it means clojure.test
         ;; hasn't loaded yet, and we don't need to rebind it.
-        (some-> ^clojure.lang.Var (resolve 'clojure.test/*test-out*)
-                (.bindRoot *out*))))))
+        (some-> (resolve 'clojure.test/*test-out*)
+                (alter-var-root (constantly *out*)))))))

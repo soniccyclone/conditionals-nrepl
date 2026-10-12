@@ -25,6 +25,9 @@
   :1.12 {:override-deps {org.clojure/clojure {:mvn/version "1.12.5"}}}
   :1.13 {:override-deps {org.clojure/clojure {:mvn/version "1.13.0-alpha5"}}}
 
+  :bench {:extra-paths ["bench"]
+          :extra-deps {criterium/criterium {:mvn/version "0.4.6"}}}
+
   :+junixsocket {:extra-deps {com.kohlschutter.junixsocket/junixsocket-common {:mvn/version "2.10.1"}
                               com.kohlschutter.junixsocket/junixsocket-native-common {:mvn/version "2.10.1"}}}
 

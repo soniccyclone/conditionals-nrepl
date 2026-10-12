@@ -5,46 +5,30 @@
   {:author "Chas Emerick"}
   (:refer-clojure :exclude [read])
   (:require
-   [clojure.java.io :as io]
    clojure.main
    clojure.test
    [nrepl.middleware :refer [set-descriptor!]]
    [nrepl.middleware.caught :as caught]
    [nrepl.middleware.print :as print]
    [nrepl.transport :as t]
+   [nrepl.util.io :as io]
    [nrepl.util.threading :as threading])
   (:import
-   (clojure.lang LineNumberingPushbackReader LispReader$ReaderException)
-   (java.io PushbackReader StringReader Writer)
-   (java.lang.reflect Field)))
+   (clojure.lang LispReader$ReaderException)))
 
 (def ^:dynamic *msg*
   "The message currently being evaluated."
   nil)
 
-(defn- set-line!
-  [^LineNumberingPushbackReader reader line]
-  (-> reader (.setLineNumber line)))
-
-(defn- set-column!
-  [^LineNumberingPushbackReader reader column]
-  (when-let [field (->> LineNumberingPushbackReader
-                        (.getDeclaredFields)
-                        (filter #(= "_columnNumber" (.getName ^Field %)))
-                        first)]
-    (-> ^Field field
-        (doto (.setAccessible true))
-        (.set reader column))))
-
 (defn- source-logging-pushback-reader
   [code line column]
-  (let [reader (LineNumberingPushbackReader. (StringReader. code))]
-    (when line (set-line! reader (int line)))
-    (when column (set-column! reader (int column)))
+  (let [reader (io/line-numbering-reader (io/string-reader code))]
+    (when line (io/set-line! reader (int line)))
+    (when column (io/set-column! reader (int column)))
     reader))
 
 (defn- short-file-name [source-path]
-  (try (.getName (io/file source-path))
+  (try (io/file-name source-path)
        (catch Exception _)))
 
 (defn- skip-stdin-newline []
@@ -58,8 +42,8 @@
   ;; Note that we check if stdin is ready in order not to block if it is empty.
   ;; The evaluated code may have set! *in* to some other Reader; the hack only
   ;; makes sense for the line-numbering reader a session binds *in* to.
-  (when (and (instance? LineNumberingPushbackReader *in*)
-             (.ready ^LineNumberingPushbackReader *in*))
+  (when (and (io/line-numbering-reader? *in*)
+             (io/reader-ready? *in*))
     (clojure.main/skip-if-eol *in*)))
 
 (defn evaluator
@@ -93,7 +77,7 @@
                        #(read-fn {:read-cond read-cond :eof eof} reader))
 
                      ;; Special case, only used for TTY transport.
-                     (instance? PushbackReader code)
+                     (io/pushback-reader? code)
                      (let [already-read? (volatile! false)]
                        ;; For TTY, only allow one read per eval, then
                        ;; return EOF.
@@ -102,10 +86,11 @@
                           (do (vreset! already-read? true)
                               (read-fn {:read-cond read-cond :eof eof} code))))
 
-                     (instance? Iterable code)
-                     (let [code (.iterator ^Iterable code)]
-                       #(if (.hasNext code)
-                          (.next code)
+                     (seqable? code)
+                     (let [remaining (volatile! code)]
+                       #(if-some [s (seq @remaining)]
+                          (do (vreset! remaining (rest s))
+                              (first s))
                           eof)))
           caught (fn [^Throwable e]
                    (set! *e e)
@@ -117,8 +102,8 @@
                                         :root-ex (str (class (clojure.main/root-cause e)))})))]
       (push-thread-bindings (merge (when explicit-ns {#'*ns* explicit-ns})
                                    (when (and file file-name)
-                                     {Compiler/SOURCE_PATH file
-                                      Compiler/SOURCE file-name})
+                                     {#'clojure.core/*file* file
+                                      #'clojure.core/*source-path* file-name})
                                    bindings))
       (try
         (loop []
@@ -144,8 +129,8 @@
                   (set! *1 value)
                   (try
                     ;; *out* has :tag metadata; *err* does not
-                    (.flush ^Writer *err*)
-                    (.flush *out*)
+                    (io/flush! *err*)
+                    (io/flush! *out*)
                     (t/respond-to msg {:ns (str (ns-name *ns*))
                                        :value value
                                        ::print/keys #{:value}})
@@ -182,8 +167,8 @@
         (cond (nil? code)
               (t/respond-to msg :status #{:error :no-code :done})
 
-              (not (or (string? code) (instance? Iterable code)
-                       (instance? PushbackReader code)))
+              (not (or (string? code) (seqable? code)
+                       (io/pushback-reader? code)))
               (t/respond-to msg :status #{:error :unknown-code-type :done})
 
               (and (some? ns) (nil? (some-> ns symbol find-ns)))

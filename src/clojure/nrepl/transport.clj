@@ -13,21 +13,15 @@
   (:refer-clojure :exclude [send])
   (:require
    [clojure.edn :as edn]
-   [clojure.java.io :as io]
    [clojure.walk :as walk]
    [nrepl.bencode :as bencode]
    [nrepl.misc :refer [response-for uuid]]
    [nrepl.socket :as socket]
+   [nrepl.util.io :as io]
    [nrepl.util.threading :as threading]
    nrepl.version)
   (:import
-   (clojure.lang RT
-                 LineNumberingPushbackReader)
-   (java.io ByteArrayOutputStream
-            Closeable
-            EOFException
-            Flushable
-            PushbackInputStream)
+   (java.io EOFException)
    (java.util.concurrent Semaphore)))
 
 (defprotocol Transport
@@ -82,9 +76,9 @@
   [input]
   input)
 
-(defmethod <bytes (RT/classForName "[B")
-  [#^"[B" input]
-  (String. input "UTF-8"))
+(defmethod <bytes io/byte-array-class
+  [input]
+  (io/utf8-string input))
 
 (defmethod <bytes clojure.lang.IPersistentVector
   [input]
@@ -117,16 +111,16 @@
 
    This will still throw an exception if called with something unencodable."
   [output thing]
-  (let [buffer (ByteArrayOutputStream.)]
+  (let [buffer (io/byte-sink)]
     (bencode/write-bencode buffer thing)
-    (socket/write output (.toByteArray buffer))))
+    (socket/write output (io/sink->bytes buffer))))
 
 (defn bencode
   "Returns a Transport implementation that serializes messages
    over the given Socket or InputStream/OutputStream using bencode."
   ([s] (bencode s s s))
   ([in out & [s]]
-   (let [in (PushbackInputStream. (socket/buffered-input in))
+   (let [in (io/pushback-input-stream (socket/buffered-input in))
          out (socket/buffered-output out)]
      (fn-transport
       #(let [payload (rethrow-on-disconnection s (bencode/read-nrepl-message in))
@@ -138,13 +132,13 @@
       #(rethrow-on-disconnection s
                                  (locking out
                                    (safe-write-bencode out %)
-                                   (.flush ^Flushable out)))
+                                   (io/flush! out)))
       (fn []
         (if s
-          (.close ^Closeable s)
+          (io/close! s)
           (do
-            (.close ^Closeable in)
-            (.close ^Closeable out))))))))
+            (io/close! in)
+            (io/close! out))))))))
 
 (defn edn
   "Returns a Transport implementation that serializes messages
@@ -152,7 +146,7 @@
   {:added "0.7"}
   ([s] (edn s s s))
   ([in out & [s]]
-   (let [in (java.io.PushbackReader. (io/reader (socket/buffered-input in)))
+   (let [in (io/pushback-reader (io/text-reader (socket/buffered-input in)))
          out (socket/buffered-output out)]
      (fn-transport
       #(rethrow-on-disconnection s (edn/read in))
@@ -161,22 +155,22 @@
                                    (binding [*print-readably* true
                                              *print-length*   nil
                                              *print-level*    nil]
-                                     (socket/write out (.getBytes ^String (str %) "UTF-8"))
-                                     (.flush ^Flushable out))))
+                                     (socket/write out (io/utf8-bytes (str %)))
+                                     (io/flush! out))))
       (fn []
         (if s
-          (.close ^Closeable s)
+          (io/close! s)
           (do
-            (.close ^Closeable in)
-            (.close ^Closeable out))))))))
+            (io/close! in)
+            (io/close! out))))))))
 
 (defn tty
   "Returns a Transport implementation suitable for serving an nREPL backend
    via simple in/out readers, as with a tty or telnet connection."
   ([s] (tty s s s))
-  ([in out & [^Closeable s]]
-   (let [r (LineNumberingPushbackReader. (io/reader in))
-         w (io/writer out)
+  ([in out & [s]]
+   (let [r (io/line-numbering-reader (io/text-reader in))
+         w (io/text-writer out)
          cns (atom "user")
          read-sync (Semaphore. 1)
          eval-ids (atom #{})
@@ -190,16 +184,16 @@
          write (fn [{:keys [out err value status ns new-session id]}]
                  (when new-session (reset! session-id new-session))
                  (when ns (reset! cns ns))
-                 (doseq [^String x [out err value] :when x]
-                   (.write w x))
+                 (doseq [x [out err value] :when x]
+                   (io/write-string! w x))
                  (when (and (some #{:done "done"} status) (contains? @eval-ids id))
                    (swap! eval-ids disj id)
-                   (.write w (str "\n" @cns "=> "))
+                   (io/write-string! w (str "\n" @cns "=> "))
                    (.release read-sync))
-                 (.flush w))
+                 (io/flush! w))
          close (when s
                  #(do (threading/put! read-queue {:op "close", :session @session-id})
-                      (.close s)))]
+                      (io/close! s)))]
      (threading/put! read-queue {:op "clone"})
      (fn-transport read write close))))
 

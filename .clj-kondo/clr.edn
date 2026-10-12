@@ -1,4 +1,10 @@
 {:cljc {:features [:cljs]}
  :linters {:unresolved-namespace {:exclude [Environment System.Environment
                                             System.IO.Path System.IO.File
-                                            System.Threading.Thread]}}}
+                                            System.Threading.Thread
+                                            System.Array]}
+           :unresolved-symbol {:exclude [System byte-array format class String
+                                         alter-var-root *err*]}}
+ :config-in-ns {nrepl.bencode {:linters {:unresolved-symbol {:exclude [definline read-byte input buf
+                                                                        off len b output s]}}}
+                nrepl.util.io {:linters {:redefined-var {:level :off}}}}}

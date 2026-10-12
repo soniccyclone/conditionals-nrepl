@@ -7,12 +7,10 @@
   (:require
    [nrepl.middleware :refer [set-descriptor!]]
    [nrepl.misc :as misc]
-   [nrepl.transport :as transport])
+   [nrepl.transport :as transport]
+   [nrepl.util.io :as io])
   (:import
-   (clojure.lang RT)
-   (java.io OutputStreamWriter PrintWriter StringWriter Writer)
-   (java.nio.charset StandardCharsets)
-   (nrepl.out CallbackBufferedOutputStream QuotaBoundWriter QuotaExceeded)
+   (java.io Writer)
    (nrepl.transport Transport)))
 
 (def ^:dynamic *print-fn*
@@ -53,9 +51,7 @@
   it has written more than `quota` bytes."
   ^Writer
   [^Writer writer quota]
-  (if quota
-    (QuotaBoundWriter. writer quota)
-    writer))
+  (io/quota-writer writer quota))
 
 (defn replying-PrintWriter
   "Returns a `java.io.PrintWriter` suitable for binding as `*out*` or `*err*`. All
@@ -63,50 +59,48 @@
   transport of `msg`, keyed by `key`."
   ^java.io.PrintWriter
   [key msg {:keys [::buffer-size ::quota]}]
-  (-> (CallbackBufferedOutputStream. #(transport/respond-to msg key %)
-                                     (or buffer-size 1024))
-      (OutputStreamWriter. StandardCharsets/UTF_8)
-      (with-quota-bound-writer quota)
-      (PrintWriter. true)))
+  (io/replying-writer #(transport/respond-to msg key %)
+                      (or buffer-size 1024)
+                      quota))
 
 (defn- send-streamed
   [{:keys [transport] :as msg}
    resp
    {:keys [::print-fn ::keys] :as opts}]
-  ;; Iterator is used instead of reduce for cleaner stacktrace if an exception
+  ;; A loop is used instead of reduce for cleaner stacktrace if an exception
   ;; gets thrown during printing.
-  (let [it (RT/iter keys)]
-    (while (.hasNext it)
-      (let [key (.next it)
-            value (get resp key)]
-        (try (with-open [writer (replying-PrintWriter key msg opts)]
-               (print-fn value writer))
-             (catch QuotaExceeded _
-               (transport/respond-to msg :status ::truncated))))))
+  (loop [ks (seq keys)]
+    (when ks
+      (let [key (first ks)
+            value (get resp key)
+            writer (replying-PrintWriter key msg opts)]
+        (when (io/print-with-quota writer
+                                   #(with-open [writer writer]
+                                      (print-fn value writer)))
+          (transport/respond-to msg :status ::truncated)))
+      (recur (next ks))))
   (transport/send transport (apply dissoc resp keys)))
 
 (defn- send-nonstreamed
   [{:keys [transport]}
    resp
    {:keys [::print-fn ::quota ::keys]}]
-  ;; Iterator is used instead of reduce for cleaner stacktrace if an exception
+  ;; A loop is used instead of reduce for cleaner stacktrace if an exception
   ;; gets thrown during printing.
-  (let [it (RT/iter keys)]
-    (loop [resp resp]
-      (if (.hasNext it)
-        (let [key (.next it)
-              value (get resp key)
-              writer (with-quota-bound-writer (StringWriter.) quota)
-              truncated? (volatile! false)]
-          (try (print-fn value writer)
-               (catch QuotaExceeded _
-                 (vreset! truncated? true)))
-          (recur (cond-> (assoc resp key (str writer))
-                   @truncated? (update ::truncated-keys (fnil conj []) key))))
+  (loop [resp resp
+         ks (seq keys)]
+    (if ks
+      (let [key (first ks)
+            value (get resp key)
+            writer (with-quota-bound-writer (io/string-writer) quota)
+            truncated? (io/print-with-quota writer #(print-fn value writer))]
+        (recur (cond-> (assoc resp key (io/writer->string writer))
+                 truncated? (update ::truncated-keys (fnil conj []) key))
+               (next ks)))
 
-        (transport/send transport (cond-> resp
-                                    (::truncated-keys resp)
-                                    (update :status #(set (conj % ::truncated)))))))))
+      (transport/send transport (cond-> resp
+                                  (::truncated-keys resp)
+                                  (update :status #(set (conj % ::truncated))))))))
 
 (defn- printing-transport
   [{:keys [transport] :as msg}]
