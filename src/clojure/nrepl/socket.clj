@@ -10,7 +10,7 @@
    [nrepl.tls :as tls])
   (:import
    (java.io BufferedInputStream BufferedOutputStream OutputStream)
-   (java.net InetSocketAddress ServerSocket Socket URI)
+   (java.net InetSocketAddress ServerSocket Socket SocketException URI)
    (java.nio ByteBuffer)
    (java.nio.channels Channels ClosedChannelException ServerSocketChannel SocketChannel)
    (javax.net.ssl SSLServerSocket)))
@@ -141,6 +141,18 @@
 
   Socket
   (is-connected? [s] (.isConnected s)))
+
+(defn disconnected-exception
+  [msg]
+  (SocketException. ^String msg))
+
+(defn disconnected?
+  [e]
+  (instance? SocketException e))
+
+(defn closed-exception?
+  [e]
+  (instance? ClosedChannelException e))
 
 ;; We have to handle this ourselves for NIO because unfortunately read and write
 ;; hang if we use both Channels/newInputStream and Channels/newOutputStream.

@@ -17,9 +17,8 @@
    [nrepl.transport :as t]
    [nrepl.util.threading :as threading])
   (:import
-   (java.net ServerSocket SocketException)
-   (javax.net.ssl SSLException)
-   [java.nio.channels ClosedChannelException]))
+   (java.net ServerSocket)
+   (javax.net.ssl SSLException)))
 
 (defn handle*
   [msg handler transport]
@@ -63,12 +62,10 @@
                       (catch SSLException ssl-exception
                         (consume-exception ssl-exception)
                         :tls-exception)
-                      (catch ClosedChannelException cce
-                        (consume-exception cce)
-                        nil)
                       (catch Throwable t
                         (consume-exception t)
-                        (when-not (.isClosed ^ServerSocket server-socket)
+                        (when-not (or (socket/closed-exception? t)
+                                      (.isClosed ^ServerSocket server-socket))
                           (log t "Unexpected exception in server loop")
                           (safe-close server-socket) ; is this a good idea?
                           (log "Shutting down server abruptly"))
@@ -84,7 +81,9 @@
                (swap! open-transports conj transport)
                (when greeting (greeting transport))
                (handle handler transport)
-               (catch SocketException _)
+               (catch Throwable t
+                 (when-not (socket/disconnected? t)
+                   (throw t)))
                (finally
                  (swap! open-transports disj transport)
                  (safe-close transport)))))))

@@ -28,8 +28,6 @@
             EOFException
             Flushable
             PushbackInputStream)
-   [java.net SocketException]
-   [java.nio.channels ClosedChannelException]
    [java.util.concurrent BlockingQueue LinkedBlockingQueue Semaphore SynchronousQueue TimeUnit]))
 
 (defprotocol Transport
@@ -102,20 +100,14 @@
   [s & body]
   `(try
      ~@body
-     (catch ClosedChannelException e#
-       (throw (SocketException. "The transport's socket appears to have lost its connection to the nREPL server")))
-     (catch RuntimeException e#
-       (if (= "EOF while reading" (ex-message e#))
-         (throw (SocketException. "The transport's socket appears to have lost its connection to the nREPL server"))
-         (throw e#)))
-     (catch EOFException e#
-       (if (= "Invalid netstring. Unexpected end of input." (ex-message e#))
-         (throw (SocketException. "The transport's socket appears to have lost its connection to the nREPL server"))
-         (throw e#)))
      (catch Throwable e#
-       (if (let [s# ~s]
-             (and (satisfies? socket/Connectable s#) (not (socket/is-connected? s#))))
-         (throw (SocketException. "The transport's socket appears to have lost its connection to the nREPL server"))
+       (if (cond
+             (socket/closed-exception? e#) true
+             (instance? RuntimeException e#) (= "EOF while reading" (ex-message e#))
+             (instance? EOFException e#) (= "Invalid netstring. Unexpected end of input." (ex-message e#))
+             :else (let [s# ~s]
+                     (and (satisfies? socket/Connectable s#) (not (socket/is-connected? s#)))))
+         (throw (socket/disconnected-exception "The transport's socket appears to have lost its connection to the nREPL server"))
          (throw e#)))))
 
 (defn ^{:private true} safe-write-bencode
