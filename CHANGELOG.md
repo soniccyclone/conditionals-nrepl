@@ -9,6 +9,7 @@
 ### New features
 
 - `:force-interrupt` config key (default true): set it to false to stop `interrupt` from force-stopping an eval thread that ignores the interrupt.
+- `nrepl.util.out/unwrap-standard-streams` undoes `wrap-standard-streams`: it restores the original `System/out`, `System/err` and root `*out*` / `*err*`, and keeps registered callbacks for a later re-wrap.
 
 ### Changes
 

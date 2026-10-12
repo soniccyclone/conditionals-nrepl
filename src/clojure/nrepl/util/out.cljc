@@ -8,6 +8,7 @@
 ;;;; State management
 
 (defonce ^:private original-print-streams (atom {}))
+(defonce ^:private original-roots (atom {}))
 (defonce ^:private callbacks (atom {:out {}, :err {}}))
 
 (defonce ^{:doc "Atom that contains `true` if standard streams have been wrapped
@@ -80,6 +81,11 @@
                                        (run-stream-callbacks :err s)))]
         ;; Replace stdout/stderr with wrapped versions. This is a global change.
         (io/install-system-writers! new-out new-err)
+        (let [root-vars (cond-> [#'*out* #'*err*]
+                          (resolve 'clojure.test/*test-out*)
+                          (conj (resolve 'clojure.test/*test-out*)))]
+          (reset! original-roots
+                  (zipmap root-vars (map #(alter-var-root % identity) root-vars))))
         ;; Also, replace global (root) *out* and *err* bindings. While we take
         ;; care of proper *out*/*err* bindings within the evaluation context (in
         ;; threads that run within the nREPL "session"), threads that spawn
@@ -94,3 +100,17 @@
         ;; hasn't loaded yet, and we don't need to rebind it.
         (some-> (resolve 'clojure.test/*test-out*)
                 (alter-var-root (constantly *out*)))))))
+
+(defn unwrap-standard-streams
+  "Undoes `wrap-standard-streams`: restores the original `System/out` and
+  `System/err` and the root bindings of *out*, *err* and clojure.test/*test-out*
+  that were in place before wrapping. Registered callbacks are kept, so they
+  fire again if the streams are wrapped later. Does nothing if the streams are
+  not currently wrapped."
+  []
+  (when @wrapped?
+    (let [{:keys [out err]} @original-print-streams]
+      (io/install-system-writers! out err)
+      (doseq [[root-var root] @original-roots]
+        (alter-var-root root-var (constantly root)))
+      (reset! wrapped? false))))
