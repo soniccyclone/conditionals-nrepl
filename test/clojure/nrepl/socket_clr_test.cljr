@@ -380,7 +380,24 @@
                 (sut/close-connection! client)
                 (sut/close-connection! server)))))))
 
-    (testing "a peer that closes cleanly ends the stream, and closing under a blocked reader is a disconnection"
+    (testing "closing a socket under a blocked reader is a disconnection for that reader"
+      (with-temp-dir
+        (fn [dir]
+          (let [path (th/path-join dir "abort")
+                ss (sut/unix-server-socket path)
+                client (sut/unix-client-socket path)
+                server (sut/accept ss)]
+            (try
+              (let [^Stream in (sut/buffered-input server)
+                    blocked (bounded/spawn #(caught (fn [] (.ReadByte in))))]
+                (bounded/sleep-ms 200)
+                (sut/close-connection! server)
+                (is (sut/disconnected? (await-caught blocked))))
+              (finally
+                (sut/close-connection! client)
+                (sut/close-listener! ss)))))))
+
+    (testing "a peer that closes gracefully under a blocked reader ends the other side's stream"
       (with-temp-dir
         (fn [dir]
           (let [path (th/path-join dir "eof")
@@ -391,10 +408,9 @@
               (let [^Stream in (sut/buffered-input server)
                     blocked (bounded/spawn #(caught (fn [] (.ReadByte in))))]
                 (bounded/sleep-ms 200)
-                (sut/close-connection! server)
-                (let [e (await-caught blocked)]
-                  (is (sut/disconnected? e))))
-              (is (= -1 (bounded/bounded #(.ReadByte ^Stream (sut/buffered-input client)))))
+                (io/close! server)
+                (await-caught blocked)
+                (is (= -1 (bounded/bounded #(.ReadByte ^Stream (sut/buffered-input client))))))
               (finally
                 (sut/close-connection! client)
                 (sut/close-listener! ss)))))))))
