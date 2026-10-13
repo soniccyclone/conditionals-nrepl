@@ -34,6 +34,10 @@ jobs:
           - {os: ubuntu-latest, clojure: '1.11', jdk: '8', aliases: ':+junixsocket'}
           - {os: ubuntu-latest, clojure: '1.11', jdk: '26', aliases: ':+junixsocket'}
           - {os: windows-latest, clojure: '1.12', jdk: '21', aliases: ''}
+          - {os: windows-latest, clojure: '1.10', jdk: '21', aliases: ''}
+          - {os: macos-latest, clojure: '1.12', jdk: '21', aliases: ''}
+          - {os: macos-latest, clojure: '1.10', jdk: '21', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.10', jdk: '21', aliases: ''}
     env:
       CLOJURE_VERSION: ${{ matrix.clojure }}
     steps:
@@ -96,6 +100,42 @@ jobs:
         say "- Clojure: ${{ matrix.clojure }}"
         say "- Java: $(java -version 2>&1 | sed -n 2p | tr -d '\r')"
         say "- Aliases: \`${{ matrix.aliases }}\`"
+        java_props="$(java -XshowSettings:properties -version 2>&1 | tr -d '\r')"
+        prop() { printf '%s\n' "$java_props" | sed -n "s/^ *$1 = //p" | head -n 1; }
+        tmpdir="$(prop java.io.tmpdir)"
+        spec="$(prop java.specification.version)"
+        spec="${spec#1.}"
+        say "- Temp dir: \`$tmpdir\`"
+        if [ "$RUNNER_OS" = macOS ]; then limit=104; else limit=108; fi
+        if [ "${spec%%[!0-9]*}" -ge 16 ] 2>/dev/null; then
+          flavor=jdk
+        elif [ -n "${{ contains(matrix.aliases, 'junixsocket') && 'yes' || '' }}" ]; then
+          flavor=junixsocket
+        else
+          flavor=""
+        fi
+        if [ -z "$flavor" ]; then
+          say "- Unix sockets: gated off, no unix-domain-flavor on Java $spec"
+        else
+          base="${tmpdir%[/\\]}"
+          case "$tmpdir" in *\\*) sep='\' ;; *) sep=/ ;; esac
+          random=18446744073709551615
+          longest_bytes=0
+          longest_path=""
+          consider() {
+            n="$(printf %s "$1" | LC_ALL=C wc -c | tr -d ' ')"
+            if [ "$n" -gt "$longest_bytes" ]; then
+              longest_bytes="$n"
+              longest_path="$1"
+            fi
+          }
+          for shape in 'nrepl-uri-/a&b=c+d$e,f' nrepl-sock-/listener nrepl-sock-/stale nrepl-sock-/server nrepl-sock-/nobody socket-test-/socket edn-sock-/socket; do
+            consider "$base$sep${shape%%/*}$random$sep${shape#*/}"
+          done
+          consider "target/socket-test-$random/socket"
+          if [ "$longest_bytes" -lt "$limit" ]; then verdict=fits; else verdict="TOO LONG"; fi
+          say "- Unix sockets: flavor $flavor, longest socket path $longest_bytes bytes, limit $limit, $verdict: \`$longest_path\`"
+        fi
         if [ ! -f "$TEST_LOG" ]; then
           say "- Result: the tests did not run"
           exit 0
