@@ -6,8 +6,8 @@ Containers that reproduce every empirical claim in =plan/*.org=. Nothing here is
 * Images
 | Image | Containerfile | Contents | Build |
 |---+---+---+---|
-| =nrepl-clr= | [[file:Containerfile.clr][Containerfile.clr]] | .NET 8 SDK, =Clojure.Main= 1.12.6, =cljr= 0.1.0-beta1 | =podman build -t nrepl-clr -f plan/verify/Containerfile.clr plan/verify= |
-| =nrepl-jvm= | [[file:Containerfile.jvm][Containerfile.jvm]] | Temurin 21, Clojure CLI, make, gcc | =podman build -t nrepl-jvm -f plan/verify/Containerfile.jvm plan/verify= |
+| =nrepl-clr= | [[file:Containerfile.clr][Containerfile.clr]] | .NET 8 SDK (build arg =DOTNET=), =Clojure.Main= 1.12.6, =cljr= 0.1.0-beta1 | =podman build -t nrepl-clr -f plan/verify/Containerfile.clr plan/verify= |
+| =nrepl-jvm= | [[file:Containerfile.jvm][Containerfile.jvm]] | Temurin 21 (build arg =JDK=), Clojure CLI (build arg =CLI_VERSION= pins it), make, git | =podman build -t nrepl-jvm -f plan/verify/Containerfile.jvm plan/verify= |
 
 * Running ClojureCLR experiments
 An experiment is a directory holding a load path (=lp/=) and a script. The load path is handed to ClojureCLR through =CLOJURE_LOAD_PATH= (no classpath on the CLR; the variable is split on =Path.PathSeparator=, =:= on Linux). Always bound the run: =--timeout= kills the container, =timeout= kills the client.
