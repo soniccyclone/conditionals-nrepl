@@ -1,0 +1,164 @@
+(ns nrepl.cmdline
+  "The ClojureCLR command-line entry for nREPL: starts a server. The
+  built-in client (--connect, --interactive, --color) is not available."
+  {:author "Chas Emerick"}
+  (:require
+   [clojure.string :as str]
+   [nrepl.cmdline.options :as options]
+   [nrepl.server :as nrepl-server]
+   [nrepl.transport :as transport]
+   [nrepl.util.runtime :as runtime]
+   [nrepl.version :as version])
+  (:import
+   (System.IO FileNotFoundException)))
+
+(defn- clean-up-and-exit
+  "Performs any necessary clean up and exits with `status`."
+  [status]
+  (shutdown-agents)
+  (flush)
+  (binding [*out* *err*] (flush))
+  (runtime/exit! status))
+
+(def exit options/exit)
+
+(def die options/die)
+
+(def help options/help)
+
+(def parse-cli-values options/parse-cli-values)
+
+(def args->cli-options options/args->cli-options)
+
+(def server-started-message options/server-started-message)
+
+(def save-port-file options/save-port-file)
+
+(def ^:private connect-url-scheme options/connect-url-scheme)
+
+(def ^:private unix-socket-url options/unix-socket-url)
+
+(defn- not-supported!
+  [option]
+  (die (str option " is not supported on ClojureCLR\n")))
+
+(defn repl-intro
+  "Returns nREPL interactive repl intro copy and version info as a new-line
+  separated string."
+  []
+  (format "nREPL %s
+Clojure %s
+%s
+Interrupt: Control+C
+Exit:      Control+D or (exit) or (quit)"
+          (:version-string version/version)
+          (clojure-version)
+          (:version-string (runtime/host-version))))
+
+(defn- ensure-url-scheme-support!
+  [scheme]
+  (cond
+    (= "telnet" scheme)
+    (die "The built-in client does not support the tty transport. Consider using `nc` or `telnet`.\n")
+
+    (#{"http" "https"} scheme)
+    (try
+      (require 'drawbridge.client)
+      (catch FileNotFoundException e
+        (if (str/includes? (str (ex-message e)) "drawbridge")
+          (die (format "nREPL: connecting to %s URLs requires the nrepl/drawbridge library on the classpath.\n"
+                       scheme))
+          (die (format "nREPL: couldn't load drawbridge.client: %s\n" (ex-message e))))))))
+
+(defn- reject-conflicting-url-options!
+  [url {:keys [port socket transport]}]
+  (when socket
+    (die (format "nREPL: --socket can't be combined with the URL %s.\n" url)))
+  (when port
+    (die (format "nREPL: --port can't be combined with the URL %s.\n" url)))
+  (when (and transport (not= transport #'transport/bencode))
+    (die (format "nREPL: --transport can't be combined with the URL %s; the transport comes from the scheme.\n" url))))
+
+(defn- run-repl
+  [& _]
+  (not-supported! "--interactive"))
+
+(defn display-help
+  "Prints the help copy to the screen and exits the program with exit code 0."
+  []
+  (println (help))
+  (exit 0))
+
+(defn display-version
+  "Prints nREPL version to the screen and exits the program with exit code 0."
+  []
+  (println (:version-string version/version))
+  (exit 0))
+
+(defn connection-opts
+  "Takes map of nREPL CLI options
+  Returns map of processed options used to connect or start a nREPL server."
+  [options]
+  (options/connection-opts options #'run-repl))
+
+(defn server-opts
+  "Takes a map of nREPL CLI options
+  Returns map of processed options to start an nREPL server."
+  [options]
+  (options/server-opts options #'run-repl))
+
+(defn start-server
+  "Creates an nREPL server instance.
+  Takes map of CLI options.
+  Returns nREPL server map."
+  [{:keys [port bind socket handler transport greeting ack-port tls-keys-str tls-keys-file]}]
+  (nrepl-server/start-server
+   :port port
+   :bind bind
+   :socket socket
+   :handler handler
+   :transport-fn transport
+   :greeting-fn greeting
+   :ack-port ack-port
+   :tls-keys-str tls-keys-str
+   :tls-keys-file tls-keys-file))
+
+(defn- handle-interrupt
+  [server _args]
+  (try
+    (nrepl-server/stop-server server)
+    (catch Exception _))
+  (runtime/exit! 0))
+
+(defn dispatch-commands
+  "Look at options to dispatch a specified command.
+  Takes CLI options map. May return a server map, nil, or exit."
+  [options]
+  (cond (:help options)    (display-help)
+        (:version options) (display-version)
+        (:connect options) (not-supported! "--connect")
+        (:interactive options) (not-supported! "--interactive")
+        (:color options) (not-supported! "--color")
+        :else (let [options (server-opts options)
+                    server (start-server options)]
+                (runtime/on-sigint! (partial handle-interrupt server))
+                (println (server-started-message server options))
+                (save-port-file server options)
+                (runtime/block-forever!))))
+
+(defn -main
+  [& args]
+  (try
+    (let [[options _args] (args->cli-options args)]
+      (dispatch-commands options))
+    (catch clojure.lang.ExceptionInfo ex
+      (let [{:keys [:nrepl/kind ::status]} (ex-data ex)]
+        (case kind
+          ::exit (clean-up-and-exit status)
+          (:nrepl.server/no-filesystem-sockets
+           :nrepl.server/invalid-start-request)
+          (do
+            (binding [*out* *err*]
+              (println (ex-message ex)))
+            (clean-up-and-exit 2))
+          (throw ex))))))
