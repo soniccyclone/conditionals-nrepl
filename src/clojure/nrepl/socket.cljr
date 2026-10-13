@@ -1,20 +1,20 @@
 (ns nrepl.socket
-  "TCP sockets on System.Net.Sockets. Unix domain sockets and URI text for
-  them are not available yet."
+  "TCP and unix domain sockets on System.Net.Sockets."
   (:require
+   [clojure.string :as str]
+   [nrepl.misc :refer [log]]
    [nrepl.tls :as tls])
   (:import
-   (System.IO EndOfStreamException IOException Stream)
+   (System.IO EndOfStreamException IOException Path Stream)
    (System.Net Dns IPAddress IPEndPoint)
    (System.Net.Sockets AddressFamily NetworkStream ProtocolType Socket SocketError
-                       SocketException SocketType TcpListener)))
-
-(defn- unsupported
-  [what]
-  (throw (ex-info (str what " is not supported on ClojureCLR yet")
-                  {:nrepl/kind :nrepl.socket/unsupported})))
+                       SocketException SocketType TcpListener UnixDomainSocketEndPoint)
+   (System.Text Encoding StringBuilder)
+   (System.Text.RegularExpressions Match Regex)))
 
 (deftype TcpServer [^TcpListener listener closed])
+
+(deftype UnixServer [^Socket listener ^String path closed])
 
 (defn- try-parse-address
   ^IPAddress [^String host]
@@ -44,13 +44,61 @@
          bind (or bind "127.0.0.1")]
      (tls/server-socket tls-context bind port))))
 
+(def unix-domain-flavor
+  (when Socket/OSSupportsUnixDomainSockets
+    :dotnet))
+
+(defn- throw-no-sockets
+  []
+  (let [msg "Filesystem sockets are not supported on this operating system"]
+    (log msg)
+    (throw (ex-info msg {:nrepl/kind ::no-filesystem-sockets}))))
+
+(defn- unix-endpoint
+  ^UnixDomainSocketEndPoint [^String path]
+  (when-not unix-domain-flavor
+    (throw-no-sockets))
+  (try
+    (UnixDomainSocketEndPoint. path)
+    (catch ArgumentOutOfRangeException e
+      (throw (ex-info (str "The unix socket path has an invalid length for this platform ("
+                           (count path) " characters, the limit is below 108): " path)
+                      {:nrepl/kind ::invalid-socket-path :path path}
+                      e)))))
+
+(defn- new-unix-socket
+  ^Socket []
+  (Socket. AddressFamily/Unix SocketType/Stream ProtocolType/Unspecified))
+
+(defn- absolute-path
+  ^String [^String path]
+  (cond
+    (not (Path/IsPathRooted path)) (Path/Combine Environment/CurrentDirectory path)
+    (Path/IsPathFullyQualified path) path
+    :else (Path/GetFullPath path)))
+
 (defn unix-server-socket
-  [_path]
-  (unsupported "Unix domain sockets"))
+  [path]
+  (let [endpoint (unix-endpoint path)
+        sock (new-unix-socket)]
+    (try
+      (.Bind sock endpoint)
+      (.Listen sock (int 50))
+      (UnixServer. sock (absolute-path path) (atom false))
+      (catch Exception e
+        (.Dispose sock)
+        (throw e)))))
 
 (defn unix-client-socket
-  [_path]
-  (unsupported "Unix domain sockets"))
+  [path]
+  (let [endpoint (unix-endpoint path)
+        sock (new-unix-socket)]
+    (try
+      (.Connect sock endpoint)
+      sock
+      (catch Exception e
+        (.Dispose sock)
+        (throw e)))))
 
 (defn closed-exception?
   [e]
@@ -62,14 +110,20 @@
 
 (defn listener-closed?
   [s]
-  (boolean @(.closed ^TcpServer s)))
+  (boolean (if (instance? UnixServer s)
+             @(.closed ^UnixServer s)
+             @(.closed ^TcpServer s))))
 
 (defn close-listener!
   [s]
-  (let [^TcpServer s s]
-    (reset! (.closed s) true)
-    (.Stop ^TcpListener (.listener s))
-    nil))
+  (if (instance? UnixServer s)
+    (let [^UnixServer s s]
+      (reset! (.closed s) true)
+      (.Dispose ^Socket (.listener s)))
+    (let [^TcpServer s s]
+      (reset! (.closed s) true)
+      (.Stop ^TcpListener (.listener s))))
+  nil)
 
 (defn- throw-closed
   []
@@ -77,38 +131,152 @@
 
 (defn accept
   [s]
-  (let [^TcpServer s s]
-    (try
-      (.AcceptSocket ^TcpListener (.listener s))
-      (catch Exception e
-        (if (listener-closed? s)
-          (throw-closed)
-          (throw e))))))
+  (try
+    (if (instance? UnixServer s)
+      (.Accept ^Socket (.listener ^UnixServer s))
+      (.AcceptSocket ^TcpListener (.listener ^TcpServer s)))
+    (catch Exception e
+      (if (listener-closed? s)
+        (throw-closed)
+        (throw e)))))
 
 (defn local-port
   [s]
-  (.Port ^IPEndPoint (.LocalEndpoint ^TcpListener (.listener ^TcpServer s))))
+  (if (instance? UnixServer s)
+    -1
+    (.Port ^IPEndPoint (.LocalEndpoint ^TcpListener (.listener ^TcpServer s)))))
+
+(def ^:private hostname-re
+  #"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.?")
+
+(def ^:private zone-re
+  #"[A-Za-z0-9._~-]+")
+
+(def ^:private uri-safe-chars
+  "-_.!~*'();/?:@&=+$,")
+
+(defn- ipv6-literal?
+  [^String s]
+  (let [zone-at (.IndexOf s "%" StringComparison/Ordinal)
+        address (if (neg? zone-at) s (subs s 0 zone-at))
+        parsed (try-parse-address address)]
+    (boolean
+     (and parsed
+          (= AddressFamily/InterNetworkV6 (.AddressFamily parsed))
+          (or (neg? zone-at)
+              (re-matches zone-re (subs s (inc zone-at))))))))
+
+(defn- invalid-uri
+  [what value]
+  (System.UriFormatException. (str "Invalid " what " in an nREPL URI: " (pr-str value))))
+
+(defn- uri-host-text
+  [^String host]
+  (cond
+    (str/blank? host) (throw (invalid-uri "host" host))
+    (re-matches hostname-re host) host
+    :else (let [bracketed? (and (= \[ (first host)) (= \] (last host)))
+                bare (if bracketed? (subs host 1 (dec (count host))) host)]
+            (if (ipv6-literal? bare)
+              (str "[" bare "]")
+              (throw (invalid-uri "host" host))))))
+
+(defn- ascii-char?
+  [c]
+  (< (int c) 128))
+
+(defn- uri-safe?
+  [c]
+  (let [c (char c)]
+    (or (and (ascii-char? c) (Char/IsAsciiLetterOrDigit c))
+        (>= (.IndexOf ^String uri-safe-chars c) 0))))
+
+(defn- percent-encode
+  ^String [^String s]
+  (let [sb (StringBuilder.)]
+    (doseq [b (.GetBytes Encoding/UTF8 s)]
+      (.Append sb (str "%" (.ToString (int b) "X2"))))
+    (str sb)))
+
+(defn- uri-quote
+  [^String s ascii?]
+  (let [sb (StringBuilder.)]
+    (doseq [c s]
+      (cond
+        (uri-safe? c) (.Append sb c)
+        (ascii-char? c) (.Append sb (percent-encode (str c)))
+        (or (Char/IsSeparator (char c)) (Char/IsControl (char c))) (.Append sb (percent-encode (str c)))
+        :else (.Append sb c)))
+    (let [quoted (str sb)]
+      (if ascii?
+        (str/replace (.Normalize ^String quoted)
+                     #"[^\x00-\x7F]+"
+                     (fn [run] (percent-encode run)))
+        quoted))))
+
+(defn- nrepl-uri-text
+  [{:keys [host server-socket]} transport-scheme ascii?]
+  (cond
+    (instance? UnixServer server-socket)
+    (str transport-scheme "+unix:" (uri-quote (.path ^UnixServer server-socket) ascii?))
+
+    (instance? TcpServer server-socket)
+    (str transport-scheme "://" (uri-host-text host) ":" (local-port server-socket))
+
+    :else
+    (throw (ex-info "URI text for this kind of server is not supported on ClojureCLR"
+                    {:nrepl/kind :nrepl.socket/unsupported}))))
+
+(defn as-nrepl-uri
+  [server transport-scheme]
+  (nrepl-uri-text server transport-scheme false))
 
 (defn as-nrepl-uri-string
-  [{:keys [host server-socket]} transport-scheme]
-  (if (instance? TcpServer server-socket)
-    (let [^String host host]
-      (str transport-scheme "://"
-           (if (and (.Contains host ":") (not= \[ (first host)))
-             (str "[" host "]")
-             host)
-           ":" (local-port server-socket)))
-    (unsupported "URI text for this kind of server")))
+  [server transport-scheme]
+  (nrepl-uri-text server transport-scheme true))
+
+(def ^:private uri-re
+  (Regex. "^(?:([A-Za-z][A-Za-z0-9+.-]*):)?(?://([^/?#]*))?([^?#]*)(?:\\?([^#]*))?(?:#(.*))?$"))
+
+(def ^:private illegal-uri-char-re
+  #"[\x00-\x20\x7F-\x9F\p{Z}\"<>\\^`{|}]|%(?![0-9A-Fa-f]{2})")
+
+(def ^:private authority-re
+  #"(?:[^@]*@)?(\[[^\]]+\]|[^:@\[\]]*)(?::([0-9]{0,9}))?")
+
+(defn- match-group
+  [^Match m n]
+  (let [g (.get_Item (.Groups m) (int n))]
+    (when (.Success g)
+      (.Value g))))
+
+(defn- server-authority
+  [authority]
+  (when-let [[_ host port] (and authority (re-matches authority-re authority))]
+    (when (or (re-matches hostname-re host)
+              (and (= \[ (first host)) (ipv6-literal? (subs host 1 (dec (count host))))))
+      {:host host
+       :port (if (= "" port) -1 (Int32/Parse ^String port))})))
 
 (defn parse-uri
   [s]
-  (let [^System.Uri uri (if (instance? System.Uri s)
-                          s
-                          (System.Uri. ^String s))
-        host (.Host uri)]
-    {:scheme (.Scheme uri)
-     :host (when (not= "" host) host)
-     :port (if (.IsDefaultPort uri) -1 (.Port uri))}))
+  (let [^String text (if (instance? System.Uri s)
+                       (.OriginalString ^System.Uri s)
+                       s)
+        m (.Match ^Regex uri-re text)
+        scheme (match-group m 1)
+        authority (match-group m 2)
+        path (match-group m 3)
+        query (match-group m 4)
+        fragment (match-group m 5)]
+    (when (or (re-find illegal-uri-char-re text)
+              (some #(and % (re-find #"[\[\]]" %)) [path query fragment])
+              (and scheme (not authority) (= "" path) (not query) (not fragment)))
+      (throw (invalid-uri "URI" text)))
+    (let [{:keys [host port]} (server-authority authority)]
+      {:scheme scheme
+       :host host
+       :port (or port -1)})))
 
 (defprotocol Connectable
   (is-connected? [s]

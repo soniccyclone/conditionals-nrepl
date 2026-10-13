@@ -3,8 +3,9 @@
    [clojure.test :refer :all]
    [nrepl.core :as nrepl]
    [nrepl.transport :as t])
-  (:import
-   (java.util.concurrent BlockingQueue CountDownLatch LinkedBlockingQueue TimeUnit)))
+  #?(:clj (:import (java.util.concurrent CountDownLatch))
+     :cljr (:import (System.Runtime.CompilerServices RuntimeHelpers)
+                    (System.Threading CountdownEvent))))
 
 (deftest response-seq
   (let [[local remote] (t/piped-transports)]
@@ -24,7 +25,7 @@
 
 (deftest client-heads
   (let [[local remote] (t/piped-transports)
-        client1 (nrepl/client local Long/MAX_VALUE)
+        client1 (nrepl/client local #?(:clj Long/MAX_VALUE :cljr Int64/MaxValue))
         all-seq (client1)]
     (doseq [x (range 10)] (t/send remote x))
     (is (= [0 1 2] (take 3 all-seq)))
@@ -40,9 +41,14 @@
   ;; the transport, and a failure report that printed them would do just that.
   (let [[local _remote] (t/piped-transports)
         distinct-heads (fn [client]
-                         (let [latch (CountDownLatch. 1)
-                               calls (mapv (fn [_] (future (.await latch) (client))) (range 8))]
-                           (.countDown latch)
-                           (count (into #{} (map #(System/identityHashCode @%)) calls))))]
+                         (let [latch #?(:clj (CountDownLatch. 1) :cljr (CountdownEvent. 1))
+                               calls (mapv (fn [_] (future #?(:clj (.await latch) :cljr (.Wait latch))
+                                                           (client)))
+                                           (range 8))]
+                           #?(:clj (.countDown latch) :cljr (.Signal latch))
+                           (count (into #{} (map #(#?(:clj System/identityHashCode
+                                                      :cljr RuntimeHelpers/GetHashCode)
+                                                   @%))
+                                        calls))))]
     (dotimes [_ 1000]
       (is (= 1 (distinct-heads (nrepl/client local 1000)))))))

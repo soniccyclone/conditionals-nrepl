@@ -2,6 +2,7 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
             [nrepl.socket :as sut]
+            [nrepl.test-helpers :as th]
             [nrepl.test-helpers.bounded :as bounded]
             [nrepl.util.io :as io])
   (:import (System.IO EndOfStreamException IOException Stream)
@@ -310,30 +311,145 @@
         (is (instance? SocketException e))
         (is (= SocketError/ConnectionRefused (.SocketErrorCode ^SocketException e)))))))
 
-(deftest parse-uri-test
-  (testing "parse-uri returns scheme, host and port of a string"
-    (is (= {:scheme "nrepl" :host "example.org" :port 7888}
-           (sut/parse-uri "nrepl://example.org:7888"))))
-
-  (testing "parse-uri reports the port as -1 when the url has none, even for a scheme with a default port"
-    (is (= -1 (:port (sut/parse-uri "nrepl://example.org"))))
-    (is (= -1 (:port (sut/parse-uri "telnet://example.org")))))
-
-  (testing "parse-uri accepts a System.Uri"
-    (is (= {:scheme "nrepl+edn" :host "h" :port 5}
-           (sut/parse-uri (System.Uri. "nrepl+edn://h:5")))))
-
-  (testing "parse-uri throws for a malformed url"
-    (is (thrown? System.UriFormatException (sut/parse-uri "nrepl://exa mple.org")))))
-
-(deftest unsupported-test
-  (testing "unix domain sockets are reported as unsupported with a kind"
-    (doseq [f [#(sut/unix-server-socket "/tmp/x") #(sut/unix-client-socket "/tmp/x")]]
-      (let [e (caught f)]
-        (is (instance? clojure.lang.ExceptionInfo e))
-        (is (= :nrepl.socket/unsupported (:nrepl/kind (ex-data e))))
-        (is (str/includes? (ex-message e) "not supported on ClojureCLR yet")))))
-
-  (testing "the URI text of a listener that is not TCP is unsupported"
+(deftest unsupported-uri-test
+  (testing "the URI text of a listener that is neither TCP nor unix is unsupported"
     (let [e (caught #(sut/as-nrepl-uri-string {:host nil :server-socket :nothing} "nrepl"))]
+      (is (instance? clojure.lang.ExceptionInfo e))
       (is (= :nrepl.socket/unsupported (:nrepl/kind (ex-data e)))))))
+
+(defn- with-temp-dir
+  [f]
+  (let [dir (th/make-temp-dir "nrepl-sock-")]
+    (try
+      (f dir)
+      (finally
+        (th/delete-recursively! dir)))))
+
+(deftest unix-listener-test
+  (when sut/unix-domain-flavor
+    (testing "the flavor names the .NET sockets"
+      (is (= :dotnet sut/unix-domain-flavor)))
+
+    (testing "the socket file exists while the listener is open and is removed when it closes"
+      (with-temp-dir
+        (fn [dir]
+          (let [path (th/path-join dir "listener")
+                ss (sut/unix-server-socket path)]
+            (try
+              (is (th/path-exists? path))
+              (is (= -1 (sut/local-port ss)))
+              (sut/close-listener! ss)
+              (is (not (th/path-exists? path)))
+              (finally
+                (sut/close-listener! ss)))))))
+
+    (testing "a file left at the path blocks the bind with AddressAlreadyInUse"
+      (with-temp-dir
+        (fn [dir]
+          (let [path (th/path-join dir "stale")]
+            (spit path "left behind")
+            (let [e (caught #(sut/unix-server-socket path))]
+              (is (instance? SocketException e))
+              (is (= SocketError/AddressAlreadyInUse (.SocketErrorCode ^SocketException e))))))))
+
+    (testing "closing the listener under a blocked accept throws something closed-exception? recognises"
+      (with-temp-dir
+        (fn [dir]
+          (let [ss (sut/unix-server-socket (th/path-join dir "blocked"))
+                blocked (bounded/spawn #(caught (fn [] (sut/accept ss))))]
+            (bounded/sleep-ms 200)
+            (sut/close-listener! ss)
+            (let [e (await-caught blocked)]
+              (is (sut/closed-exception? e))
+              (is (sut/listener-closed? ss)))))))
+
+    (testing "a connection accepted before the listener closed keeps working, in both directions"
+      (with-temp-dir
+        (fn [dir]
+          (let [path (th/path-join dir "pair")
+                ss (sut/unix-server-socket path)
+                client (sut/unix-client-socket path)
+                server (sut/accept ss)]
+            (try
+              (sut/close-listener! ss)
+              (sut/write (sut/buffered-output client) (io/utf8-bytes "ping"))
+              (is (= "ping" (read-text (sut/buffered-input server) 4)))
+              (sut/write (sut/buffered-output server) (io/utf8-bytes "pong"))
+              (is (= "pong" (read-text (sut/buffered-input client) 4)))
+              (finally
+                (sut/close-connection! client)
+                (sut/close-connection! server)))))))
+
+    (testing "a peer that closes cleanly ends the stream, and closing under a blocked reader is a disconnection"
+      (with-temp-dir
+        (fn [dir]
+          (let [path (th/path-join dir "eof")
+                ss (sut/unix-server-socket path)
+                client (sut/unix-client-socket path)
+                server (sut/accept ss)]
+            (try
+              (let [^Stream in (sut/buffered-input server)
+                    blocked (bounded/spawn #(caught (fn [] (.ReadByte in))))]
+                (bounded/sleep-ms 200)
+                (sut/close-connection! server)
+                (let [e (await-caught blocked)]
+                  (is (sut/disconnected? e))))
+              (is (= -1 (bounded/bounded #(.ReadByte ^Stream (sut/buffered-input client)))))
+              (finally
+                (sut/close-connection! client)
+                (sut/close-listener! ss)))))))))
+
+(deftest unix-socket-path-test
+  (when sut/unix-domain-flavor
+    (testing "a path over the platform limit is reported with the path and a kind, and creates nothing"
+      (with-temp-dir
+        (fn [dir]
+          (let [path (th/path-join dir (apply str (repeat 120 "a")))
+                e (caught #(sut/unix-server-socket path))]
+            (is (instance? clojure.lang.ExceptionInfo e))
+            (is (= :nrepl.socket/invalid-socket-path (:nrepl/kind (ex-data e))))
+            (is (= path (:path (ex-data e))))
+            (is (str/includes? (ex-message e) "invalid length"))
+            (is (not (th/path-exists? path)))
+            (let [e (caught #(sut/unix-client-socket path))]
+              (is (= :nrepl.socket/invalid-socket-path (:nrepl/kind (ex-data e)))))))))
+
+    (testing "a relative path is reported as an absolute one"
+      (with-temp-dir
+        (fn [dir]
+          (let [previous Environment/CurrentDirectory]
+            (try
+              (set! Environment/CurrentDirectory dir)
+              (let [ss (sut/unix-server-socket "relative.sock")]
+                (try
+                  (is (th/path-exists? (th/path-join dir "relative.sock")))
+                  (is (= (str "nrepl+unix:" (str/replace (th/path-join Environment/CurrentDirectory "relative.sock")
+                                                         "\\" "%5C"))
+                         (sut/as-nrepl-uri-string {:host nil :server-socket ss} "nrepl")))
+                  (finally
+                    (sut/close-listener! ss))))
+              (finally
+                (set! Environment/CurrentDirectory previous)))))))
+
+    (when-not th/win?
+      (testing "a non-ASCII path is percent-encoded as UTF-8 in the ASCII text and kept in the plain text"
+        (with-temp-dir
+          (fn [dir]
+            (doseq [[name ascii plain] [["\u00e9" "%C3%A9" "\u00e9"]
+                                        ["e\u0301" "%C3%A9" "e\u0301"]
+                                        ["\u65e5\u672c" "%E6%97%A5%E6%9C%AC" "\u65e5\u672c"]
+                                        ["\ud83d\ude00" "%F0%9F%98%80" "\ud83d\ude00"]
+                                        ["a\u00a0b" "a%C2%A0b" "a%C2%A0b"]
+                                        ["a\tb" "a%09b" "a%09b"]]]
+              (let [path (th/path-join dir name)
+                    ss (sut/unix-server-socket path)
+                    prefix (str "nrepl+unix:" (str/replace dir "\\" "%5C") (str/replace th/sys-file-sep "\\" "%5C"))]
+                (try
+                  (is (= (str prefix ascii)
+                         (sut/as-nrepl-uri-string {:host nil :server-socket ss} "nrepl"))
+                      (pr-str name))
+                  (is (= (str prefix plain)
+                         (str (sut/as-nrepl-uri {:host nil :server-socket ss} "nrepl")))
+                      (pr-str name))
+                  (finally
+                    (sut/close-listener! ss)))))))))))
