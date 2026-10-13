@@ -190,6 +190,12 @@
                     (= SocketError/ConnectionRefused (.SocketErrorCode ^SocketException e))) true
                :else (recur (.InnerException ^Exception e))))))
 
+(defn close!
+  "Closes the Closeable (JVM) or IDisposable (CLR) X."
+  [x]
+  #?(:clj (.close ^java.io.Closeable x)
+     :cljr (.Dispose ^IDisposable x)))
+
 (defmacro thrown-with?
   "True when BODY throws an exception for which the predicate PRED holds."
   [pred & body]

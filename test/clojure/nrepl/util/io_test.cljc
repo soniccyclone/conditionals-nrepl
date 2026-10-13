@@ -866,3 +866,20 @@
              _ (creation-ms make 4000)
              last-ms (creation-ms make 1000)]
          (is (< last-ms (min 150.0 (+ 50.0 (* 3.0 first-ms)))) (str first-ms " ms then " last-ms " ms"))))))
+
+#?(:cljr
+   (deftest stdin-reader-creation-cost-is-flat
+     (testing "stdin readers ask through their own callback"
+       (let [asked (atom [])
+             readers (mapv (fn [i] (io/stdin-reader #(swap! asked conj i))) (range 3))
+             handles (mapv (fn [r] (spawn #(rd r))) readers)]
+         (is (wait-until #(= 3 (count @asked))))
+         (is (= [0 1 2] (sort @asked)))
+         (doseq [r readers] (io/add-input! r "x"))
+         (is (= [(int \x) (int \x) (int \x)] (mapv await-result handles)))))
+     (testing "the last thousand of 6000 stdin readers cost about what the first thousand did and stay cheap"
+       (let [make #(io/stdin-reader (fn []))
+             first-ms (creation-ms make 1000)
+             _ (creation-ms make 4000)
+             last-ms (creation-ms make 1000)]
+         (is (< last-ms (min 150.0 (+ 50.0 (* 3.0 first-ms)))) (str first-ms " ms then " last-ms " ms"))))))

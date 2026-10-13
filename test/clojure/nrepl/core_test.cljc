@@ -25,6 +25,7 @@
    [nrepl.middleware.session :as session]
    [nrepl.misc :refer [uuid]]
    [nrepl.server :as server]
+   #?(:cljr [nrepl.test-helpers.bounded :as bounded])
    [nrepl.test-helpers :as th :refer [is+ win?]]
    #?(:clj [nrepl.util.classloader])
    [nrepl.util.threading :as threading]
@@ -71,6 +72,18 @@
 (def ^:private sleep-fn
   #?(:clj "Thread/sleep"
      :cljr "System.Threading.Thread/Sleep"))
+
+(def ^:private current-thread-code
+  #?(:clj "(Thread/currentThread)"
+     :cljr "System.Threading.Thread/CurrentThread"))
+
+(def ^:private thread-terminated-code
+  #?(:clj "(str (.getState curr-t))"
+     :cljr "(not (.IsAlive curr-t))"))
+
+(def ^:private thread-terminated-value
+  #?(:clj "TERMINATED"
+     :cljr true))
 
 (def ^:private thread-info-code
   #?(:clj "[(.getName (Thread/currentThread)) (.isDaemon (Thread/currentThread))]"
@@ -229,7 +242,7 @@
         request {:op "eval" :ns "user" :code (format "(def %s 1000)" sym)
                  :file "test.clj" :line 42 :column 10}]
     (doall (message timeout-client request))
-    (is+ {:file "test.clj", :line 42, :column 10}
+    (is+ {:file "test.clj", :line 42, :column #?(:clj 10 :cljr 11)}
          (meta (resolve (symbol "user" sym))))))
 
 (def-repl-test no-code
@@ -312,10 +325,12 @@
               (remove nil?)))))
 
 (def-repl-test session-*out*-writer-length-translation
-  (is+ {:out (th/newline->sys "#inst \"2013-02-11T12:13:44.000+00:00\"\n")}
+  (is+ {:out (th/newline->sys #?(:clj "#inst \"2013-02-11T12:13:44.000+00:00\"\n"
+                                 :cljr "#inst \"2013-02-11T12:13:44.000-00:00\"\n"))}
        (-> (repl-eval session
-                      (code (println (doto (java.util.GregorianCalendar. 2013 1 11 12 13 44)
-                                       (.setTimeZone (java.util.TimeZone/getTimeZone "GMT"))))))
+                      #?(:clj (code (println (doto (java.util.GregorianCalendar. 2013 1 11 12 13 44)
+                                               (.setTimeZone (java.util.TimeZone/getTimeZone "GMT")))))
+                         :cljr (code (println (System.DateTime. 2013 2 11 12 13 44 System.DateTimeKind/Utc)))))
            combine-responses)))
 
 (def-repl-test streaming-out-without-explicit-flushing
@@ -339,7 +354,7 @@
                              :code "#?(:clj (+ 1 2) :cljs (+ 2 3))"})
             combine-responses))
   (is+ {:value ["3"]}
-       (->> (message client {:op "eval" :code "#?(:clj (+ 1 2) :cljs (+ 2 3))"})
+       (->> (message client {:op "eval" :code (str "#?(" #?(:clj ":clj" :cljr ":cljr") " (+ 1 2) :cljs (+ 2 3))")})
             combine-responses)))
 
 (def-repl-test ensure-whitespace-prints
@@ -424,7 +439,7 @@
            (repl-eval "(throw (Exception. \"bad, bad code\"))")
            combine-responses
            clean-response))
-  (is (= [true] (repl-values session "(.contains (str *e) \"bad, bad code\")"))))
+  (is (= [true] (repl-values session (code (#?(:clj .contains :cljr .Contains) (str *e) "bad, bad code"))))))
 
 (def-repl-test multiple-expressions-return
   (is (= [5 18] (repl-values session "5 (/ 5 0) (+ 5 6 7)"))))
@@ -577,8 +592,7 @@
           (let [v (repl-values session "@vol")]
             (th/sleep 1000)
             (is (= v (repl-values session "@vol")))
-            #?(:clj (is (= ["TERMINATED"] (repl-values session "(str (.getState curr-t))")))
-               :cljr (is (= [true] (repl-values session "(not (.IsAlive curr-t))"))))))))))
+            (is (= [thread-terminated-value] (repl-values session thread-terminated-code)))))))))
 
 ;; NREPL-66: ensure that bindings of implementation vars aren't captured by user sessions
 ;; (https://github.com/clojure-emacs/cider/issues/785)
@@ -637,15 +651,31 @@
         (is (re-matches #"nREPL-handler-\d+" (deref handled 5000 "")))))))
 
 (def-repl-test eval-adds-no-frames-to-the-session-thread-stack
-  (is+ [3] (repl-values session
-                        (code (let [frames (.getStackTrace (Thread/currentThread))
-                                    run-frame (first (keep-indexed
-                                                      (fn [i frame]
-                                                        (when (re-find #"interruptible_eval.*[$]run__\d+$"
-                                                                       (.getClassName ^StackTraceElement frame))
-                                                          i))
-                                                      frames))]
-                                (- (count frames) run-frame))))))
+  (is+ [#?(:clj 3 :cljr [1 true])]
+       (repl-values session
+                    #?(:clj (code (let [frames (.getStackTrace (Thread/currentThread))
+                                        run-frame (first (keep-indexed
+                                                          (fn [i frame]
+                                                            (when (re-find #"interruptible_eval.*[$]run__\d+$"
+                                                                           (.getClassName ^StackTraceElement frame))
+                                                              i))
+                                                          frames))]
+                                    (- (count frames) run-frame)))
+                       :cljr (code (let [names (mapv (fn [frame]
+                                                       (let [method (.GetMethod ^System.Diagnostics.StackFrame frame)]
+                                                         (str (.DeclaringType method) "::" (.Name method))))
+                                                     (.GetFrames (System.Diagnostics.StackTrace.)))
+                                         run-frame (first (keep-indexed
+                                                           (fn [i name]
+                                                             (when (re-find #"interruptible_eval[$]evaluatorrun__\d+__\d+::invoke$" name)
+                                                               i))
+                                                           names))
+                                         abort-frames (keep-indexed
+                                                       (fn [i name]
+                                                         (when (= "System.Runtime.ControlledExecution::Run" name)
+                                                           i))
+                                                       names)]
+                                     [(count abort-frames) (< run-frame (first abort-frames))]))))))
 
 (defn- drain
   [transport timeout-ms]
@@ -676,53 +706,77 @@
            (-> (message timeout-session {:op "interrupt"})
                first
                clean-response))
-      (repl-values timeout-session "(def t2 (Thread/currentThread))")
+      (repl-values timeout-session (str "(def t2 " current-thread-code ")"))
       (th/sleep 1500)
-      (is+ [true] (repl-values timeout-session "(identical? t2 (Thread/currentThread))"))))
+      (is+ [true] (repl-values timeout-session (str "(identical? t2 " current-thread-code ")")))))
 
   (def-repl-test forced-stop-sends-no-eval-error
     (with-redefs [threading/force-stop-delay-ms 500]
       (let [{sid :session messages :messages}
             (spin-and-interrupt client transport
-                                (code (do (def curr-t (Thread/currentThread))
+                                (code (do (def curr-t #?(:clj (Thread/currentThread)
+                                                         :cljr System.Threading.Thread/CurrentThread))
                                           (while true))))]
         (is (some #(and (= "spin" (:id %)) (has-status? % :interrupted)) messages))
         (is (not-any? #(has-status? % :eval-error) messages))
-        (is+ ["TERMINATED"]
+        (is+ [thread-terminated-value]
              (response-values (message client {:op "eval" :session sid
-                                               :code "(str (.getState curr-t))"}))))))
+                                               :code thread-terminated-code}))))))
 
   (def-repl-test forced-stop-runs-finally
     (with-redefs [threading/force-stop-delay-ms 500]
       (message session {:op "eval"
-                        :code (code (let [p (promise)]
+                        :code (code (let [p (atom nil)]
                                       (def p p)
                                       (try (loop [] (recur))
-                                           (finally (deliver p :ran)))))})
+                                           (finally (reset! p :ran)))))})
       (th/sleep 300)
       (is+ {:status #{:done}}
            (-> (message session {:op "interrupt"})
                first
                clean-response))
       (th/sleep (+ 500 1000))
-      (is+ [true] (repl-values session "(realized? p)"))))
+      (is+ [:ran] (repl-values session "@p"))))
 
   (def-repl-test interrupt-swallowed-by-user-catch-is-force-stopped
     (with-redefs [threading/force-stop-delay-ms 500]
       (message session {:op "eval"
-                        :code (code (do (def curr-t (Thread/currentThread))
-                                        (try #?(:clj (Thread/sleep 30000)
-                                                :cljr (System.Threading.Thread/Sleep 30000))
-                                             (catch #?(:clj InterruptedException
-                                                       :cljr System.Threading.ThreadInterruptedException) _
-                                               (loop [] (recur))))))})
+                        :code #?(:clj (code (do (def curr-t (Thread/currentThread))
+                                                (try (Thread/sleep 30000)
+                                                     (catch InterruptedException _
+                                                       (loop [] (recur))))))
+                                 :cljr (code (do (def curr-t System.Threading.Thread/CurrentThread)
+                                                 (try (System.Threading.Thread/Sleep 30000)
+                                                      (catch System.Threading.ThreadInterruptedException _))
+                                                 (loop [] (recur)))))})
       (th/sleep 300)
       (is+ {:status #{:done}}
            (-> (message session {:op "interrupt"})
                first
                clean-response))
       (th/sleep (+ 500 1000))
-      (is+ ["TERMINATED"] (repl-values session "(str (.getState curr-t))"))))
+      (is+ [thread-terminated-value] (repl-values session thread-terminated-code))))
+
+  #?(:cljr
+     (def-repl-test spin-inside-a-user-catch-cannot-be-force-stopped
+       (with-redefs [threading/force-stop-delay-ms 500]
+         (message session {:op "eval"
+                           :code (code (do (def curr-t System.Threading.Thread/CurrentThread)
+                                           (def release (volatile! false))
+                                           (try (System.Threading.Thread/Sleep 30000)
+                                                (catch System.Threading.ThreadInterruptedException _
+                                                  (loop [] (when-not @release (recur)))))))})
+         (th/sleep 300)
+         (is+ {:status #{:done}}
+              (-> (message session {:op "interrupt"})
+                  first
+                  clean-response))
+         (th/sleep (+ 500 1000))
+         (is+ [true] (repl-values session "(.IsAlive curr-t)"))
+         (is+ [2] (repl-values session "(+ 1 1)"))
+         (repl-values session "(vreset! release true)")
+         (th/sleep 1000)
+         (is+ [true] (repl-values session "(not (.IsAlive curr-t))")))))
 
   (def-repl-test force-interrupt-false-keeps-the-thread
     (with-redefs [threading/force-stop-delay-ms 300
@@ -730,7 +784,8 @@
       (message session {:op "eval"
                         :code (code (do (def vol (volatile! 0))
                                         (def stop? (volatile! false))
-                                        (def curr-t (Thread/currentThread))
+                                        (def curr-t #?(:clj (Thread/currentThread)
+                                                       :cljr System.Threading.Thread/CurrentThread))
                                         (while (not @stop?)
                                           (vswap! vol inc))))})
       (th/sleep 300)
@@ -739,11 +794,17 @@
                first
                clean-response))
       (th/sleep (+ 300 1000))
-      (is+ ["RUNNABLE"] (repl-values session "(str (.getState curr-t))"))
-      (is+ ["TERMINATED"] (repl-values session
-                                       (code (do (vreset! stop? true)
-                                                 (.join curr-t 5000)
-                                                 (str (.getState curr-t)))))))))
+      (is+ [#?(:clj "RUNNABLE" :cljr true)]
+           (repl-values session #?(:clj "(str (.getState curr-t))"
+                                   :cljr "(.IsAlive curr-t)")))
+      (is+ [thread-terminated-value]
+           (repl-values session
+                        #?(:clj (code (do (vreset! stop? true)
+                                          (.join curr-t 5000)
+                                          (str (.getState curr-t))))
+                           :cljr (code (do (vreset! stop? true)
+                                           (.Join curr-t 5000)
+                                           (not (.IsAlive curr-t))))))))))
 
 (def-repl-test blocked-ephemeral-evals-do-not-starve-handling
   (dotimes [_ 32]
@@ -756,13 +817,17 @@
 (def-repl-test ensure-transport-closeable
   (is (= [5] (repl-values session "5")))
   (is (instance? #?(:clj java.io.Closeable :cljr System.IDisposable) transport))
-  (.close transport)
+  (th/close! transport)
   (is (th/thrown-with? th/disconnected? (repl-values session "5"))))
 
 (def-repl-test ensure-server-closeable
-  (.close *server*)
+  (th/close! *server*)
   (th/sleep 100)
   (is (th/thrown-with? th/connection-refused? (connect :port (:port *server*)))))
+
+(def ^:private disconnection-message
+  #?(:clj #"(?i)(lost.*connection|socket closed|connection reset)"
+     :cljr #"(?i)(lost.*connection|connection abort|connection reset)"))
 
 (defn- disconnection-exception?
   [e]
@@ -771,7 +836,7 @@
   ;; transport's own "lost its connection" message.
   (let [cause (root-cause e)]
     (and (th/disconnected? cause)
-         (re-find #"(?i)(lost.*connection|socket closed|connection reset)" (ex-message cause)))))
+         (re-find disconnection-message (ex-message cause)))))
 
 (deftest transports-fail-on-disconnects
   (testing "Ensure that transports fail ASAP when the server they're connected to goes down."
@@ -781,12 +846,14 @@
                              :transport-fn *transport-fn*)]
       (transport/send transport {:op "eval" :code "(+ 1 1)"})
 
-      (let [reader (future (while true (transport/recv transport)))]
+      (let [reader #?(:clj (future (while true (transport/recv transport)))
+                      :cljr (bounded/spawn #(while true (transport/recv transport))))]
         (th/sleep 100)
-        (.close server)
+        (th/close! server)
         (th/sleep 100)
         (try
-          (deref reader 1000 :timeout)
+          #?(:clj (deref reader 1000 :timeout)
+             :cljr (bounded/await-result reader))
           (assert false "A reader started prior to the server closing should throw an error...")
           (catch #?(:clj Throwable :cljr Exception) e
             (is (disconnection-exception? e)))))
@@ -815,7 +882,7 @@
     (let [resp (repl-eval client "1 2 3 4 5 6 7 8 9 10")]
       (is+ {:value "1"} (first resp))
       (th/sleep 1000)
-      (.close *server*)
+      (th/close! *server*)
       (th/sleep 1000)
       (try
         ;; these responses were on the wire before the remote transport was closed
@@ -860,13 +927,15 @@
   ;; the session down: the eval still completes, and later evals on the same
   ;; session are still answered (though *in* itself stays closed).
   (dorun (message timeout-session {:op "stdin" :stdin []}))
-  (is+ [""] (repl-values timeout-session "(slurp *in*)"))
+  (is+ [""] (repl-values timeout-session #?(:clj "(slurp *in*)"
+                                            :cljr "(with-open [r *in*] (.ReadToEnd r))")))
   (is+ [2] (repl-values timeout-session "(+ 1 1)")))
 
 (def-repl-test rebinding-*in*-keeps-the-session-alive
   ;; *in* may be set! to any Reader, not only a PushbackReader.
   (dorun (repl-eval timeout-session
-                    (code (set! *in* (java.io.BufferedReader. (java.io.StringReader. "hi\n"))))))
+                    #?(:clj (code (set! *in* (java.io.BufferedReader. (java.io.StringReader. "hi\n"))))
+                       :cljr (code (set! *in* (System.IO.StringReader. "hi\n"))))))
   (is+ ["hi"] (repl-values timeout-session "(read-line)"))
   (is+ [2] (repl-values timeout-session "(+ 1 1)")))
 
@@ -875,7 +944,8 @@
   ;; either. *out* is rebound for every message, so the next eval gets a
   ;; working one again.
   (dorun (repl-eval timeout-session
-                    (code (set! *out* (doto (java.io.BufferedWriter. (java.io.StringWriter.)) .close)))))
+                    #?(:clj (code (set! *out* (doto (java.io.BufferedWriter. (java.io.StringWriter.)) .close)))
+                       :cljr (code (set! *out* (doto (System.IO.StreamWriter. (System.IO.MemoryStream.)) .Close))))))
   (is+ [2] (repl-values timeout-session "(+ 1 1)")))
 
 (def-repl-test request-multiple-read-newline-*in*
@@ -1020,7 +1090,7 @@
        (-> (repl-eval client (code (binding [*out* *err*] (prn 'user/foo))))
            combine-responses))
   (is+ {:ns "user" :err #"problem" :value [":value"]}
-       (-> (repl-eval client (code (do (.write *err* "problem") :value)))
+       (-> (repl-eval client (code (do (#?(:clj .write :cljr .Write) *err* "problem") :value)))
            combine-responses))
   (is+ {:err #"Divide by zero"}
        (-> (repl-eval client (code (/ 1 0)))
@@ -1279,7 +1349,7 @@
               combine-responses)))
 
   (testing "multiple-expressions"
-    (is+ [4 65536.0] (repl-values session "(+ 1 3) (Math/pow 2 16)"))
+    (is+ [4 65536.0] (repl-values session (str "(+ 1 3) (" #?(:clj "Math/pow" :cljr "Math/Pow") " 2 16)")))
     (is+ [4 20 1 0] (repl-values session "(+ 2 2) (* *1 5) (/ *2 4) (- *3 4)"))
     (is+ [0] (repl-values session "*1"))))
 

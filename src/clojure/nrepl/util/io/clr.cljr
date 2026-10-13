@@ -53,6 +53,22 @@
     `(let [~(with-meta action {:tag target-action-type}) invoke-target]
        (CallbackBufferedWriter. ~action ~callback (int ~buffer-size)))))
 
+(def ^:private need-input-action-type
+  (symbol "System.Action`1[System.Object]"))
+
+(defmacro ^:private need-input-action
+  []
+  `(gen-delegate ~need-input-action-type [f#] (f#)))
+
+(def ^:private invoke-need-input
+  (need-input-action))
+
+(defmacro ^:private queue-reader
+  [need-input-fn]
+  (let [action (gensym "action")]
+    `(let [~(with-meta action {:tag need-input-action-type}) invoke-need-input]
+       (QueuePollingReader. ~action ~need-input-fn))))
+
 (defn pushback-input-stream
   ^PushbackInputStream [^Stream in]
   (PushbackInputStream. (BufferedStream. in)))
@@ -171,7 +187,7 @@
 
 (defn stdin-reader
   ^QueuePollingReader [need-input-fn]
-  (QueuePollingReader. (gen-delegate System.Action [] (need-input-fn))))
+  (queue-reader need-input-fn))
 
 (defprotocol StdinSink
   (add-input! [r s])

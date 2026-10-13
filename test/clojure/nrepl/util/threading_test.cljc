@@ -105,19 +105,19 @@
 (deftest cancel-ends-a-cancellable-loop-test
   (let [executor (threading/make-executor {:name-fmt "threading-test-%d"})
         started (promise)
-        exited (promise)]
+        exited (atom false)]
     (try
       (let [handle (threading/submit! executor
                                       (fn []
                                         (deliver started true)
                                         (while (not (threading/cancelled?))
                                           (spin))
-                                        (deliver exited true)))]
+                                        (reset! exited true)))]
         (is (true? (deref started bounded/wait-ms false)))
         (bounded/sleep-ms 100)
-        (is (not (realized? exited)))
+        (is (false? @exited))
         (threading/cancel! handle)
-        (is (true? (deref exited bounded/wait-ms false))))
+        (is (true? (bounded/wait-until #(deref exited)))))
       (finally
         (shutdown! executor)))))
 
@@ -445,14 +445,14 @@
                                       (fn []
                                         (try (deliver ready true)
                                              (loop [] (recur))
-                                             (finally (deliver ran true)))))
+                                             (finally (reset! ran true)))))
                        (catch #?(:clj ThreadDeath :cljr Exception) _))))]
     (deliver holder thread)
     thread))
 
 (when-not win?
   (deftest interrupt-stop-kills-a-spinning-thread-test
-    (let [ran (promise)
+    (let [ran (atom false)
           ready (promise)
           thread (spinner ran ready)]
       (threading/start-session-thread! thread)
@@ -463,7 +463,7 @@
       (is (true? (threading/alive? thread)))
       (is (true? (await-dead thread)))
       (is (false? (threading/alive? thread)))
-      (is (true? (deref ran bounded/wait-ms false))))))
+      (is (true? @ran)))))
 
 (deftest force-interrupt-false-keeps-the-thread-test
   (let [stop (atom false)
@@ -593,8 +593,8 @@
 #?(:cljr
    (deftest forced-stop-test
      (testing "the body's own catch sees an abort stop-exception? recognises and cannot swallow it"
-       (let [seen (promise)
-             after (promise)
+       (let [seen (atom nil)
+             after (atom false)
              ready (promise)
              holder (promise)
              thread (threading/session-thread
@@ -605,34 +605,35 @@
                                         (try (deliver ready true)
                                              (loop [] (recur))
                                              (catch Exception e
-                                               (deliver seen e)))
-                                        (deliver after true)))))]
+                                               (reset! seen e)))
+                                        (reset! after true)))))]
          (deliver holder thread)
          (threading/start-session-thread! thread)
          (is (true? (deref ready bounded/wait-ms false)))
          (impl/interrupt-stop thread 300)
          (is (true? (await-dead thread)))
-         (is (threading/stop-exception? (deref seen bounded/wait-ms nil)))
-         (is (instance? ThreadAbortException (deref seen bounded/wait-ms nil)))
-         (is (not (realized? after)))))
+         (is (threading/stop-exception? @seen))
+         (is (instance? ThreadAbortException @seen))
+         (is (false? @after))))
      (testing "run-interruptible returns nil for a killed body and clears the cts slot"
-       (let [result (promise)
+       (let [result (atom :none)
              ready (promise)
              holder (promise)
              thread (threading/session-thread
                      "threading-test-forced-value"
                      (fn []
-                       (deliver result [(interruptibly @holder
-                                                       (fn []
-                                                         (deliver ready true)
-                                                         (loop [] (recur))))
-                                        (nil? @(.cts-slot ^SessionThread @holder))])))]
+                       (reset! result [(interruptibly @holder
+                                                      (fn []
+                                                        (deliver ready true)
+                                                        (loop [] (recur))))
+                                       (nil? @(.cts-slot ^SessionThread @holder))])))]
          (deliver holder thread)
          (threading/start-session-thread! thread)
          (is (true? (deref ready bounded/wait-ms false)))
          (is (some? @(.cts-slot ^SessionThread thread)))
          (impl/interrupt-stop thread 300)
-         (is (= [nil true] (deref result bounded/wait-ms :timeout)))))
+         (is (true? (await-dead thread)))
+         (is (= [nil true] @result))))
      (testing "the slot is also cleared after a normal return and after an exception"
        (let [thread (threading/session-thread "threading-test-slot" (fn []))
              slot (.cts-slot ^SessionThread thread)]

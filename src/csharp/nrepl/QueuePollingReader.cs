@@ -21,6 +21,11 @@ namespace nrepl
             this.sendNeedInputRequest = sendNeedInputRequest;
         }
 
+        public QueuePollingReader(Action<object> sendNeedInputRequest, object target)
+            : this(() => sendNeedInputRequest(target))
+        {
+        }
+
         private int PollInputChar()
         {
             while (true)

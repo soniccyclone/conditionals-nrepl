@@ -219,6 +219,18 @@
           (sut/write out (io/utf8-bytes "xdefz") 1 3)
           (is (= "abcdef" (read-text in 6)))))))
 
+  (testing "a text reader over a socket's input gets what has arrived instead of waiting to fill its buffer"
+    (with-pair
+      (fn [^Socket client ^Socket server]
+        (sut/write (sut/buffered-output client) (io/utf8-bytes (apply str (repeat 3000 "x"))))
+        (let [reader (io/text-reader (sut/buffered-input server))]
+          (is (= 3000 (bounded/bounded
+                       #(loop [n 0]
+                          (if (< n 3000)
+                            (do (.Read ^System.IO.TextReader reader)
+                                (recur (inc n)))
+                            n)))))))))
+
   (testing "a stream passes through as its own input and output"
     (let [ms (System.IO.MemoryStream.)]
       (is (identical? ms (sut/buffered-input ms)))

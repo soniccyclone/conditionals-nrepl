@@ -194,7 +194,7 @@
 
 (extend-protocol AsBufferedInputStreamSubset
   Socket
-  (buffered-input [s] (System.IO.BufferedStream. (socket-stream s)))
+  (buffered-input [s] (socket-stream s))
   Stream
   (buffered-input [s] s))
 

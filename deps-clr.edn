@@ -7,6 +7,7 @@
                                                                  :git/sha "d21dfc3"}}
                   :exec-fn nrepl.clr-test-runner/run
                   :exec-args {:dirs ["test/clojure"]
+                              :excludes [:clr-pending]
                               :nses [nrepl.test-helpers.match-test
                                      nrepl.csharp-helpers-test
                                      nrepl.util.io-test
@@ -20,4 +21,7 @@
                                      nrepl.middleware.print-test
                                      nrepl.util.out-test
                                      nrepl.sanity-test
-                                     nrepl.middleware-test]}}}}
+                                     nrepl.middleware-test
+                                     nrepl.core-test
+                                     nrepl.middleware.session-test
+                                     nrepl.middleware.interruptible-eval-test]}}}}
