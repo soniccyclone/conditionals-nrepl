@@ -166,13 +166,19 @@
         roots (set (remove empty? @roots))]
     [classes roots]))
 
+(def ^:private namespace-file-extensions
+  #?(:clj [".clj" ".cljs" ".cljc"]
+     :cljr [".clj" ".cljc" ".cljr"]))
+
+(def ^:private namespace-file-pattern
+  #?(:clj #"\.cljc?$"
+     :cljr #"\.clj[cr]?$"))
+
 (defn namespaces-on-classpath*
   [files]
   (into []
         (keep (fn [^String file]
-                (when (or (ends-with? file ".clj")
-                          (ends-with? file ".cljs")
-                          (ends-with? file ".cljc"))
+                (when (some #(ends-with? file %) namespace-file-extensions)
                   (let [ns-str (-> (subs file 0 (last-index-of file "."))
                                    (str/replace "/" ".")
                                    (str/replace "_" "-"))]
@@ -279,7 +285,7 @@
          (let [member->type (fn [m]
                               (case (:kind m)
                                 :constructor :constructor
-                                :field (if (:static? m) :static-field :field)
+                                (:field :property :event) (if (:static? m) :static-field :field)
                                 (if (:static? m) :static-method :method)))
                update-cache (fn [cache member name type]
                               (update cache
@@ -393,7 +399,7 @@
           [literals prefix] (split-by-leading-literals prefix)
           cands-from-cp
           (for [{:keys [^String ns-str file]} (namespaces&files-on-classpath)
-                :when (and (re-find #"\.cljc?$" file)
+                :when (and (re-find namespace-file-pattern file)
                            (if has-dot
                              (nscl-matches? prefix ns-str)
                              (starts-with? ns-str prefix)))]

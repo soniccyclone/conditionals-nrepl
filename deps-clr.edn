@@ -28,4 +28,9 @@
                                      nrepl.middleware-test
                                      nrepl.core-test
                                      nrepl.middleware.session-test
-                                     nrepl.middleware.interruptible-eval-test]}}}}
+                                     nrepl.middleware.interruptible-eval-test
+                                     nrepl.util.completion-test
+                                     nrepl.util.lookup-test
+                                     nrepl.middleware.completion-test
+                                     nrepl.middleware.lookup-test
+                                     nrepl.describe-test]}}}}

@@ -8,7 +8,8 @@
    [nrepl.middleware :as middleware]
    [nrepl.server :as server]
    [nrepl.test-helpers :refer [is+]]
-   [nrepl.version :as version]))
+   [nrepl.version :as version])
+  #?(:cljr (:import (System.Runtime.InteropServices RuntimeInformation))))
 
 (use-fixtures :once repl-server-fixture)
 
@@ -20,9 +21,11 @@
 
 (def-repl-test simple-describe
   (is+ {:versions {:nrepl (#'middleware/safe-version version/version)
-                   :clojure (assoc (#'middleware/safe-version *clojure-version*)
-                                   :version-string (clojure-version))
-                   :java {:version-string (System/getProperty "java.version")}}
+                   :clojure (merge (assoc (#'middleware/safe-version *clojure-version*)
+                                          :version-string (clojure-version))
+                                   #?(:cljr {:major 1 :minor 12 :incremental 6 :qualifier ""}))
+                   #?(:clj :java :cljr :clr) {:version-string #?(:clj (System/getProperty "java.version")
+                                                                 :cljr (RuntimeInformation/FrameworkDescription))}}
         :ops (mc/all-of (mc/via #(set (map name (keys %))) built-in-ops)
                         (fn [ops]
                           (every? empty? (vals ops))))
@@ -45,7 +48,7 @@
               (mc/via #(set (map name (keys %))) built-in-ops)
               (fn [ops] (every? #(seq (:doc %)) (vals ops))))
         :aux {:current-ns "user"
-              :host {:name "jvm"
+              :host {:name #?(:clj "jvm" :cljr "clr")
                      :can-stop-threads #(contains? #{"true" "false"} %)}}}
        (->> (nrepl/message timeout-client
                            {:op "describe" :verbose? "true"})

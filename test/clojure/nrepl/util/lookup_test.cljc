@@ -2,8 +2,8 @@
   (:require [clojure.test :refer :all]
             [nrepl.bencode :as bencode]
             [nrepl.test-helpers :refer [is+]]
-            [nrepl.util.lookup :as l :refer [lookup]])
-  (:import (java.io ByteArrayOutputStream)))
+            [nrepl.util.io :as io]
+            [nrepl.util.lookup :as l :refer [lookup]]))
 
 (deftest lookup-test
   (testing "special sym lookup"
@@ -48,11 +48,11 @@
 (defn- bencode-str
   "Bencode a thing and write it into a string."
   [thing]
-  (let [out (ByteArrayOutputStream.)]
+  (let [out (io/byte-sink)]
     (try
       (bencode/write-bencode out thing)
-      (.toString out)
-      (catch IllegalArgumentException ex
+      (io/utf8-string (io/sink->bytes out))
+      (catch #?(:clj IllegalArgumentException :cljr ArgumentException) ex
         (throw (ex-info (ex-message ex) {:thing thing}))))))
 
 (defn- lookup-public-vars
@@ -62,7 +62,7 @@
    (comp
     (mapcat ns-publics)
     (map (comp meta val))
-    (map #(lookup (.getName ^clojure.lang.Namespace (:ns %)) (:name %))))
+    (map #(lookup (ns-name (:ns %)) (:name %))))
    conj
    #{}
    (all-ns)))

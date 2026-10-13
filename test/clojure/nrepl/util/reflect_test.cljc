@@ -137,6 +137,7 @@
               (is (some #{"nrepl/util/reflect.cljc"} files))
               (is (some #{"java/lang/String.class"} files)))
        :cljr (do
+               (is (some #{"clojure/core.clj"} files))
                (is (some #{"nrepl/util/reflect.cljc"} files))
                (is (some #{"nrepl/util/reflect/clr.cljr"} files))
                (is (some #{"System/String.class"} files))
@@ -167,6 +168,12 @@
          (touch root "e/f/g.cljc")
          (touch root "d.txt")
          (touch root "h.CLJ")
+         (touch root "s/t.clj")
+         (touch root "s/t.cljc")
+         (touch root "s/t.cljr")
+         (touch root "s/u.clj")
+         (touch root "s/u.cljc")
+         (touch root "s/v.clj")
          (touch other "o.clj")
          (Environment/SetEnvironmentVariable
           "CLOJURE_LOAD_PATH"
@@ -176,6 +183,9 @@
            (is (every? files ["a/b.clj" "c.cljr" "e/f/g.cljc" "o.clj" "other/o.clj"]))
            (is (not (contains? files "d.txt")))
            (is (not (contains? files "h.CLJ")))
+           (testing "only the file the runtime would load is listed"
+             (is (= #{"s/t.cljr" "s/u.cljc" "s/v.clj"}
+                    (set (filter #(re-find #"^s/" %) listed)))))
            (is (= (count listed) (count files))))
          (finally
            (Environment/SetEnvironmentVariable "CLOJURE_LOAD_PATH" original)
