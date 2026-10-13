@@ -116,7 +116,8 @@ jobs:
           [["nrepl-uri-" "a&b=c+d$e,f" false]
            ["nrepl-sock-" "listener" false]
            ["nrepl-sock-" "relative.sock" true]
-           ["socket-test-" "socket" false]])
+           ["socket-test-" "socket" false]
+           ["edn-sock-" "socket" false]])
 
         (def tr (try (CultureInfo/GetCultureInfo "tr-TR") (catch Exception _ nil)))
         (def tr-upper-i (when tr (.ToUpper "i" tr)))
