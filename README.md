@@ -5,7 +5,7 @@
 ----------
 [![JVM tests](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/jvm.yml/badge.svg)](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/jvm.yml)
 [![ClojureCLR tests](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/clr.yml/badge.svg)](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/clr.yml)
-[![Spell-check Status](https://github.com/nrepl/nrepl/actions/workflows/spell_checking.yml/badge.svg)](https://github.com/nrepl/nrepl/actions/workflows/spell_checking.yml)
+[![Spell-check Status](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/spell_checking.yml/badge.svg?event=pull_request)](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/spell_checking.yml)
 [![Clojars Project](https://img.shields.io/clojars/v/nrepl.svg)](https://clojars.org/nrepl/nrepl)
 [![cljdoc badge](https://cljdoc.org/badge/nrepl/nrepl)](https://cljdoc.org/d/nrepl/nrepl/CURRENT)
 [![Downloads](https://img.shields.io/clojars/dt/nrepl/nrepl?color=cornflowerblue)](https://clojars.org/nrepl/nrepl)

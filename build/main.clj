@@ -3,8 +3,7 @@
   (:require [clojure.java.io :as io]
             [clojure.java.process :as p]
             [clojure.tools.build.api :as b]
-            [clojure.tools.build.tasks.write-pom]
-            [deps-deploy.deps-deploy :as dd]))
+            [clojure.tools.build.tasks.write-pom]))
 
 (defn default-opts [{:keys [version] :or {version "99.99"}}]
   (let [lib 'nrepl/nrepl
@@ -74,14 +73,6 @@
                :target-dir class-dir
                :include    "**"})
   (b/jar opts))
-
-(defcmd deploy [{:keys [version jar-file] :as opts}]
-  (assert (some->> version (re-matches #"\d+\.\d+\.\d+.*")) (str version))
-  (jar opts)
-  (log "Deploying %s to Clojars..." version)
-  (dd/deploy {:installer :remote
-              :artifact (b/resolve-path jar-file)
-              :pom-file (b/pom-path opts)}))
 
 (defcmd install [{:keys [version] :as opts}]
   (jar opts)
