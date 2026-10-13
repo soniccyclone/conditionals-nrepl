@@ -1,0 +1,42 @@
+(ns nrepl.clr-test-runner
+  (:require [clojure.string :as str]
+            [cognitect.test-runner.api :as api])
+  (:import (System.IO File Path StringWriter)))
+
+(defn- warning-path [line]
+  (second (re-find #"^Reflection warning, (.+?):\d+:\d+ - " line)))
+
+(defn- src-file? [^String src-dir ^String path]
+  (File/Exists (Path/Combine src-dir path)))
+
+(defn- load-namespaces [nses]
+  (let [captured (StringWriter.)
+        err *err*]
+    (try
+      (binding [*warn-on-reflection* true
+                *err* captured]
+        (apply require nses))
+      (finally
+        (.Write err (str captured))
+        (.Flush err)))
+    (str captured)))
+
+(defn run
+  "Runs the namespaces in :nses with cognitect.test-runner.api. Reflection
+  warnings raised while they load are printed and counted; one that comes from
+  a file under :src-dir (default \"src/clojure\") fails the run."
+  [{:keys [nses src-dir] :or {src-dir "src/clojure"} :as opts}]
+  (let [paths (keep warning-path (str/split-lines (load-namespaces nses)))
+        in-src (filter #(src-file? src-dir %) paths)
+        outcome (binding [*warn-on-reflection* true]
+                  (try (api/test opts)
+                       nil
+                       (catch Exception e e)))]
+    (println (format "Reflection warnings: %d under %s, %d elsewhere"
+                     (count in-src) src-dir (- (count paths) (count in-src))))
+    (when (seq in-src)
+      (throw (ex-info (str "Reflection warnings in " src-dir ": "
+                           (str/join ", " (distinct in-src)))
+                      {:paths (vec in-src)})))
+    (when outcome
+      (throw outcome))))

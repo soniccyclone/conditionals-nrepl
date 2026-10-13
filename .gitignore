@@ -27,3 +27,5 @@ build.xml
 /.clj-kondo/.cache
 /.lsp/
 /.claude/
+/src/csharp/nrepl/bin/
+/src/csharp/nrepl/obj/

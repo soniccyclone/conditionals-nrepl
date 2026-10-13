@@ -1,0 +1,211 @@
+(ns nrepl.socket
+  "TCP sockets on System.Net.Sockets. Unix domain sockets and URI text for
+  them are not available yet."
+  (:require
+   [nrepl.tls :as tls])
+  (:import
+   (System.IO EndOfStreamException IOException Stream)
+   (System.Net Dns IPAddress IPEndPoint)
+   (System.Net.Sockets AddressFamily NetworkStream ProtocolType Socket SocketError
+                       SocketException SocketType TcpListener)))
+
+(defn- unsupported
+  [what]
+  (throw (ex-info (str what " is not supported on ClojureCLR yet")
+                  {:nrepl/kind :nrepl.socket/unsupported})))
+
+(deftype TcpServer [^TcpListener listener closed])
+
+(defn- try-parse-address
+  ^IPAddress [^String host]
+  (let [^IPAddress address nil]
+    (when (IPAddress/TryParse host (by-ref address))
+      address)))
+
+(defn- resolve-address
+  ^IPAddress [^String host]
+  (or (try-parse-address host)
+      (let [addresses (Dns/GetHostAddresses host)]
+        (or (first (filter #(= AddressFamily/InterNetwork (.AddressFamily ^IPAddress %))
+                           addresses))
+            (first addresses)
+            (throw (ex-info (str "Cannot resolve host " host)
+                            {:nrepl/kind :nrepl.socket/unresolved-host :host host}))))))
+
+(defn inet-socket
+  ([bind port]
+   (let [port (or port 0)
+         bind (or bind "127.0.0.1")
+         listener (TcpListener. (resolve-address bind) (int port))]
+     (.Start listener)
+     (TcpServer. listener (atom false))))
+  ([bind port tls-context]
+   (let [port (or port 0)
+         bind (or bind "127.0.0.1")]
+     (tls/server-socket tls-context bind port))))
+
+(defn unix-server-socket
+  [_path]
+  (unsupported "Unix domain sockets"))
+
+(defn unix-client-socket
+  [_path]
+  (unsupported "Unix domain sockets"))
+
+(defn closed-exception?
+  [e]
+  (or (instance? ObjectDisposedException e)
+      (and (instance? SocketException e)
+           (let [code (.SocketErrorCode ^SocketException e)]
+             (or (= SocketError/Interrupted code)
+                 (= SocketError/OperationAborted code))))))
+
+(defn listener-closed?
+  [s]
+  (boolean @(.closed ^TcpServer s)))
+
+(defn close-listener!
+  [s]
+  (let [^TcpServer s s]
+    (reset! (.closed s) true)
+    (.Stop ^TcpListener (.listener s))
+    nil))
+
+(defn- throw-closed
+  []
+  (throw (ObjectDisposedException. "The nREPL listener is closed")))
+
+(defn accept
+  [s]
+  (let [^TcpServer s s]
+    (try
+      (.AcceptSocket ^TcpListener (.listener s))
+      (catch Exception e
+        (if (listener-closed? s)
+          (throw-closed)
+          (throw e))))))
+
+(defn local-port
+  [s]
+  (.Port ^IPEndPoint (.LocalEndpoint ^TcpListener (.listener ^TcpServer s))))
+
+(defn as-nrepl-uri-string
+  [{:keys [host server-socket]} transport-scheme]
+  (if (instance? TcpServer server-socket)
+    (let [^String host host]
+      (str transport-scheme "://"
+           (if (and (.Contains host ":") (not= \[ (first host)))
+             (str "[" host "]")
+             host)
+           ":" (local-port server-socket)))
+    (unsupported "URI text for this kind of server")))
+
+(defn parse-uri
+  [s]
+  (let [^System.Uri uri (if (instance? System.Uri s)
+                          s
+                          (System.Uri. ^String s))
+        host (.Host uri)]
+    {:scheme (.Scheme uri)
+     :host (when (not= "" host) host)
+     :port (if (.IsDefaultPort uri) -1 (.Port uri))}))
+
+(defprotocol Connectable
+  (is-connected? [s]
+    "Returns true if socket-like thing `s` is currently connected."))
+
+(extend-type Socket
+  Connectable
+  (is-connected? [s] (.Connected s)))
+
+(defn disconnected-exception
+  [msg]
+  (IOException. ^String msg (SocketException. (int SocketError/ConnectionAborted))))
+
+(defn- disconnection-code?
+  [e]
+  (let [code (.SocketErrorCode ^SocketException e)]
+    (or (= SocketError/ConnectionAborted code)
+        (= SocketError/ConnectionReset code)
+        (= SocketError/Shutdown code))))
+
+(defn disconnected?
+  [e]
+  (cond
+    (instance? EndOfStreamException e) true
+    (instance? SocketException e) (disconnection-code? e)
+    (instance? IOException e) (let [cause (.InnerException ^IOException e)]
+                                (and (instance? SocketException cause)
+                                     (disconnection-code? cause)))
+    :else false))
+
+(defn connect
+  [host port]
+  (let [sock (Socket. SocketType/Stream ProtocolType/Tcp)]
+    (try
+      (.Connect sock ^String host (int port))
+      sock
+      (catch Exception e
+        (.Dispose sock)
+        (throw e)))))
+
+(defn close-connection!
+  [s]
+  (.Dispose ^Socket s))
+
+(def ^:private weak-table-type
+  (symbol "System.Runtime.CompilerServices.ConditionalWeakTable`2[System.Net.Sockets.Socket,System.Net.Sockets.NetworkStream]"))
+
+(defmacro ^:private new-weak-table
+  []
+  `(new ~weak-table-type))
+
+(defmacro ^:private with-weak-table
+  [[sym] & body]
+  `(let [~(with-meta sym {:tag weak-table-type}) ~sym]
+     ~@body))
+
+(def ^:private socket-streams
+  (new-weak-table))
+
+(defn- lookup-stream
+  ^NetworkStream [table ^Socket sock]
+  (with-weak-table [table]
+    (let [^NetworkStream stream nil]
+      (when (.TryGetValue table sock (by-ref stream))
+        stream))))
+
+(defn- socket-stream
+  ^NetworkStream [^Socket sock]
+  (locking sock
+    (or (lookup-stream socket-streams sock)
+        (let [stream (NetworkStream. sock true)]
+          (with-weak-table [socket-streams]
+            (.Add socket-streams sock stream))
+          stream))))
+
+(defprotocol AsBufferedInputStreamSubset
+  (buffered-input [x]
+    "Returns the byte stream the reader thread reads from x."))
+
+(defprotocol AsBufferedOutputStreamSubset
+  (buffered-output [x]
+    "Returns the byte stream writes to x go to."))
+
+(extend-protocol AsBufferedInputStreamSubset
+  Socket
+  (buffered-input [s] (socket-stream s))
+  Stream
+  (buffered-input [s] s))
+
+(extend-protocol AsBufferedOutputStreamSubset
+  Socket
+  (buffered-output [s] (socket-stream s))
+  Stream
+  (buffered-output [s] s))
+
+(defn write
+  ([^Stream out ^bytes buf]
+   (.Write out buf (int 0) (int (alength buf))))
+  ([^Stream out ^bytes buf offset length]
+   (.Write out buf (int offset) (int length))))

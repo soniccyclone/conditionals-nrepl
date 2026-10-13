@@ -1,0 +1,242 @@
+(ns nrepl.util.io.clr
+  "internal host seam"
+  {:no-doc true}
+  (:refer-clojure :exclude [array?])
+  (:require
+   [clojure.clr.io :as cio])
+  (:import
+   (clojure.lang LineNumberingTextReader PushbackInputStream PushbackTextReader)
+   (System.IO BufferedStream File FileInfo MemoryStream Path Stream StringReader
+              StringWriter TextReader TextWriter)
+   (System.Net.Sockets Socket SocketShutdown)
+   (System.Reflection Assembly BindingFlags FieldInfo)
+   (System.Text Encoding)))
+
+(defn- dll-path
+  ^String []
+  (let [env (Environment/GetEnvironmentVariable "NREPL_CSHARP_DLL")]
+    (if (and env (not= "" env))
+      env
+      (let [^FileInfo f (clojure.lang.RT/FindFile "nrepl/util/io.cljc")]
+        (when-not f
+          (throw (ex-info "Cannot locate nrepl/util/io.cljc to find nrepl.dll; set NREPL_CSHARP_DLL"
+                          {:nrepl/kind ::dll-not-found})))
+        (Path/Combine (.FullName (-> f .Directory .Parent .Parent .Parent))
+                      "csharp/nrepl/bin/Release/netstandard2.0/nrepl.dll")))))
+
+(defn- load-dll
+  [^String path]
+  (when-not (File/Exists path)
+    (throw (ex-info (str "nrepl.dll not found at " path ". Build it with: "
+                         "dotnet build -c Release src/csharp/nrepl/nrepl.csproj"
+                         " (or point NREPL_CSHARP_DLL at a built copy)")
+                    {:nrepl/kind ::dll-not-found, :path path})))
+  (Assembly/LoadFrom path))
+
+(load-dll (dll-path))
+
+(import '(nrepl CallbackBufferedWriter QuotaBoundWriter QuotaExceededException
+                QueuePollingReader TeeWriter))
+
+(def ^:private target-action-type
+  (symbol "System.Action`2[System.Object,System.String]"))
+
+(defmacro ^:private target-action
+  []
+  `(gen-delegate ~target-action-type [f# s#] (f# s#)))
+
+(def ^:private invoke-target
+  (target-action))
+
+(defmacro ^:private callback-writer
+  [callback buffer-size]
+  (let [action (gensym "action")]
+    `(let [~(with-meta action {:tag target-action-type}) invoke-target]
+       (CallbackBufferedWriter. ~action ~callback (int ~buffer-size)))))
+
+(def ^:private need-input-action-type
+  (symbol "System.Action`1[System.Object]"))
+
+(defmacro ^:private need-input-action
+  []
+  `(gen-delegate ~need-input-action-type [f#] (f#)))
+
+(def ^:private invoke-need-input
+  (need-input-action))
+
+(defmacro ^:private queue-reader
+  [need-input-fn]
+  (let [action (gensym "action")]
+    `(let [~(with-meta action {:tag need-input-action-type}) invoke-need-input]
+       (QueuePollingReader. ~action ~need-input-fn))))
+
+(defn pushback-input-stream
+  ^PushbackInputStream [^Stream in]
+  (PushbackInputStream. (BufferedStream. in)))
+
+(def byte-array-class (class (byte-array 0)))
+
+(defn byte-array?
+  [o]
+  (instance? byte-array-class o))
+
+(defn array?
+  [o]
+  (.IsArray ^Type (class o)))
+
+(defn byte-sink
+  ^MemoryStream []
+  (MemoryStream.))
+
+(defn sink->bytes
+  ^bytes [^MemoryStream s]
+  (.ToArray s))
+
+(defn copy!
+  [in out]
+  (.CopyTo ^Stream in ^Stream out))
+
+(defn utf8-bytes
+  ^bytes [^String s]
+  (.GetBytes Encoding/UTF8 s))
+
+(defn utf8-string
+  ^String [^bytes b]
+  (.GetString Encoding/UTF8 b))
+
+(defn text-reader
+  [x]
+  (cio/text-reader x))
+
+(defn text-writer
+  [x]
+  (cio/text-writer x))
+
+(defn pushback-reader
+  ^PushbackTextReader [^TextReader r]
+  (PushbackTextReader. r))
+
+(defn pushback-reader?
+  [x]
+  (instance? PushbackTextReader x))
+
+(defn line-numbering-reader
+  ^LineNumberingTextReader [^TextReader r]
+  (LineNumberingTextReader. r))
+
+(defn line-numbering-reader?
+  [x]
+  (instance? LineNumberingTextReader x))
+
+(defn set-line!
+  [^LineNumberingTextReader reader line]
+  (set! (.LineNumber reader) (int line)))
+
+(def ^:private ^FieldInfo column-field
+  (.GetField LineNumberingTextReader "_columnNumber"
+             (enum-or BindingFlags/NonPublic BindingFlags/Instance)))
+
+(def ^:private ^FieldInfo has-unread-field
+  (.GetField PushbackTextReader "_hasUnread"
+             (enum-or BindingFlags/NonPublic BindingFlags/Instance)))
+
+(defn set-column!
+  [^LineNumberingTextReader reader column]
+  (when column-field
+    (.SetValue column-field reader (int column))))
+
+(defn reader-ready?
+  [^TextReader r]
+  (boolean (or (and has-unread-field
+                    (instance? PushbackTextReader r)
+                    (.GetValue has-unread-field r))
+               (not= -1 (.Peek r)))))
+
+(defn string-reader
+  ^StringReader [^String s]
+  (StringReader. s))
+
+(defn string-writer
+  ^StringWriter []
+  (StringWriter.))
+
+(defn writer->string
+  ^String [w]
+  (.ToString ^Object w))
+
+(defn write-string!
+  [^TextWriter w ^String s]
+  (.Write w s))
+
+(defn flush!
+  [w]
+  (if (instance? TextWriter w)
+    (.Flush ^TextWriter w)
+    (.Flush ^Stream w)))
+
+(defn close!
+  [x]
+  (when (instance? Socket x)
+    (try
+      (.Shutdown ^Socket x SocketShutdown/Both)
+      (catch Exception _
+        nil)))
+  (.Dispose ^IDisposable x))
+
+(defn closeable?
+  [x]
+  (instance? IDisposable x))
+
+(defn file-name
+  [path]
+  (Path/GetFileName ^String path))
+
+(defn stdin-reader
+  ^QueuePollingReader [need-input-fn]
+  (queue-reader need-input-fn))
+
+(defprotocol StdinSink
+  (add-input! [r s])
+  (add-eof! [r]))
+
+(extend-protocol StdinSink
+  QueuePollingReader
+  (add-input! [r s] (.AddInput r s))
+  (add-eof! [r] (.AddEof r)))
+
+(defn quota-writer
+  ^TextWriter [^TextWriter writer quota]
+  (if quota
+    (QuotaBoundWriter. writer (int quota))
+    writer))
+
+(defn replying-writer
+  ^TextWriter [callback buffer-size quota]
+  (-> (callback-writer callback buffer-size)
+      (quota-writer quota)))
+
+(defn print-with-quota
+  [writer f]
+  (try
+    (f)
+    (and (instance? QuotaBoundWriter writer)
+         (.Exceeded ^QuotaBoundWriter writer))
+    (catch QuotaExceededException _
+      true)))
+
+(defn tee-writer
+  ^TextWriter [^TextWriter original callback]
+  (TeeWriter. original (callback-writer callback 1024)))
+
+(defn root-writer
+  ^TextWriter [^TextWriter stream]
+  stream)
+
+(defn install-system-writers!
+  [^TextWriter out ^TextWriter err]
+  (Console/SetOut out)
+  (Console/SetError err))
+
+(defn system-writers
+  []
+  {:out Console/Out, :err Console/Error})

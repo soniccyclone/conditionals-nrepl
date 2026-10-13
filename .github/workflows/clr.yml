@@ -1,0 +1,71 @@
+name: ClojureCLR tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.role }} .NET ${{ matrix.dotnet }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.informational }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, dotnet: '8.0', role: target, informational: false}
+          - {os: windows-latest, dotnet: '8.0', role: target, informational: false}
+          - {os: ubuntu-latest, dotnet: '10.0', role: informational, informational: true}
+          - {os: windows-latest, dotnet: '10.0', role: informational, informational: true}
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: ${{ matrix.dotnet }}.x
+
+    - name: Install ClojureCLR and cljr
+      run: |
+        dotnet tool install --global Clojure.Main --version 1.12.6 --framework net${{ matrix.dotnet }}
+        dotnet tool install --global Clojure.Cljr --version 0.1.0-beta1 --framework net${{ matrix.dotnet }}
+
+    - name: Put the dotnet tools on PATH
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          tools="$(cygpath -w "$HOME/.dotnet/tools")"
+        else
+          tools="$HOME/.dotnet/tools"
+        fi
+        echo "$tools" >> "$GITHUB_PATH"
+
+    - name: Show the runtime ClojureCLR runs on
+      shell: bash
+      run: |
+        dotnet --list-runtimes
+        framework="$(Clojure.Main -e '(println (System.Runtime.InteropServices.RuntimeInformation/FrameworkDescription))' | tr -d '\r')"
+        echo "ClojureCLR runs on: $framework"
+        case "$framework" in
+          ".NET ${{ matrix.dotnet }}."*) ;;
+          *) echo "expected .NET ${{ matrix.dotnet }}"; exit 1 ;;
+        esac
+
+    - name: Cache git dependencies
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.gitlibs
+          .cpcache
+        key: clr-${{ runner.os }}-net${{ matrix.dotnet }}-${{ hashFiles('deps-clr.edn') }}
+        restore-keys: |
+          clr-${{ runner.os }}-net${{ matrix.dotnet }}-
+
+    - name: Build the C# helpers
+      run: dotnet build -c Release src/csharp/nrepl/nrepl.csproj
+
+    - name: Fetch dependencies
+      run: cljr -P -X:test
+
+    - name: Run the tests
+      run: cljr -X:test

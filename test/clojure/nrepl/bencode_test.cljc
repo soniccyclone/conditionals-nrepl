@@ -14,14 +14,35 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [nrepl.bencode :as bencode :refer [read-bencode
                                                read-netstring
+                                               read-nrepl-message
                                                write-bencode
-                                               write-netstring]])
-  (:import clojure.lang.RT
-           [java.io ByteArrayInputStream ByteArrayOutputStream PushbackInputStream]))
+                                               write-netstring]]
+            [nrepl.test-helpers.bounded :refer [await-result sleep-ms spawn]]
+            [nrepl.util.io :as io])
+  #?(:clj (:import [java.io ByteArrayInputStream PipedInputStream PipedOutputStream])
+     :cljr (:import [System.IO MemoryStream]
+                    [System.IO.Pipes AnonymousPipeClientStream AnonymousPipeServerStream
+                     PipeDirection]
+                    [System.Text Encoding])))
 
 (defn #^{:private true} >bytes
   [#^String input]
-  (.getBytes input "UTF-8"))
+  (io/utf8-bytes input))
+
+(defn- input-stream
+  [bytes]
+  #?(:clj (ByteArrayInputStream. bytes)
+     :cljr (MemoryStream. ^bytes bytes)))
+
+(defn- byte-array-of
+  [xs]
+  (byte-array (map #?(:clj unchecked-byte :cljr #(bit-and % 0xFF)) xs)))
+
+(def ^:private eof-exception
+  #?(:clj java.io.EOFException :cljr System.IO.EndOfStreamException))
+
+(def ^:private io-exception
+  #?(:clj java.io.IOException :cljr System.IO.IOException))
 
 (defmulti #^{:private true} <bytes class)
 
@@ -29,9 +50,9 @@
   [input]
   input)
 
-(defmethod <bytes (RT/classForName "[B")
-  [#^"[B" input]
-  (String. input "UTF-8"))
+(defmethod <bytes io/byte-array-class
+  [input]
+  (io/utf8-string input))
 
 (defmethod <bytes clojure.lang.IPersistentVector
   [input]
@@ -46,14 +67,14 @@
 (defn- decode
   [bytes & {:keys [reader]}]
   (-> bytes
-      ByteArrayInputStream.
-      PushbackInputStream.
+      input-stream
+      io/pushback-input-stream
       reader))
 
 (defn- >input
   [^String input & args]
   (-> input
-      (.getBytes "UTF-8")
+      >bytes
       (#(apply decode % args))
       <bytes))
 
@@ -94,16 +115,16 @@
     "d6:cheesei42e3:haml4:eggsee" {"cheese" 42 "ham" ["eggs"]}))
 
 (defn- >stream
-  ^ByteArrayOutputStream
   [thing & {:keys [writer]}]
-  (doto (ByteArrayOutputStream.)
+  (doto (io/byte-sink)
     (writer thing)))
 
 (defn- >output
   [& args]
   (-> >stream
-      ^ByteArrayOutputStream (apply args)
-      (.toString "UTF-8")))
+      (apply args)
+      io/sink->bytes
+      io/utf8-string))
 
 (deftest test-netstring-writing
   (are [x y] (= (>output (>bytes x) :writer write-netstring) y)
@@ -127,7 +148,7 @@
     "Здравей, Свят!" "25:Здравей, Свят!"))
 
 (deftest test-input-stream-writing
-  (are [x y] (= (>output (ByteArrayInputStream. (>bytes x))
+  (are [x y] (= (>output (input-stream (>bytes x))
                          :writer write-bencode) y)
     ""               "0:"
     "Hello, World!"  "13:Hello, World!"
@@ -143,10 +164,15 @@
     ;; Works for all integral types.
     ;; Note: BigInts (42N) not tested, since they are not
     ;; supported in 1.2.
-    (Byte/parseByte "42" 10)   "i42e"
-    (Short/parseShort "42" 10) "i42e"
-    (Integer/parseInt "42" 10) "i42e"
-    (Long/parseLong "42" 10)   "i42e"))
+    #?(:clj (Byte/parseByte "42" 10) :cljr (byte 42))   "i42e"
+    #?(:clj (Short/parseShort "42" 10) :cljr (short 42)) "i42e"
+    #?(:clj (Integer/parseInt "42" 10) :cljr (int 42))   "i42e"
+    #?(:clj (Long/parseLong "42" 10) :cljr (long 42))    "i42e"
+    #?@(:cljr [42N "i42e"
+               (sbyte 42) "i42e"
+               (ushort 42) "i42e"
+               (uint 42) "i42e"
+               (ulong 42) "i42e"])))
 
 (deftest test-named-writing
   (are [x y] (= (>output x :writer write-bencode) y)
@@ -183,7 +209,7 @@
 (deftest unencoded-values
   ;; just some PNG data that won't round-trip cleanly through UTF-8 encoding, so
   ;; any default encoding in the bencode implementation will be caught immediately
-  (let [binary-data (byte-array
+  (let [binary-data (byte-array-of
                      [-119 80 78 71 13 10 26 10 0 0 0 13 73 72 68 82 0 0 0
                       100 0 0 0 100 8 6 0 0 0 112 -30 -107 84 0 0 3 -16 105
                       67 67 80 73 67 67 32 80 114 111 102 105 108 101 0 0 40
@@ -193,17 +219,73 @@
     (is (= (seq binary-data)
            (-> {"data" binary-data}
                (>stream :writer write-bencode)
-               .toByteArray
+               io/sink->bytes
                (decode :reader read-bencode)
                (get "data")
                seq)))))
 
 (deftest unwritable-values
   (testing "write-bencode writes eagerly"
-    (let [out (ByteArrayOutputStream.)]
-      (is (thrown? IllegalArgumentException
+    (let [out (io/byte-sink)]
+      (is (thrown? #?(:clj IllegalArgumentException :cljr ArgumentException)
                    (write-bencode out {"obj" (Object.)})))
-      (is (= "d3:obj" (String. (.toByteArray out)))))))
+      (is (= "d3:obj" (io/utf8-string (io/sink->bytes out)))))))
+
+;; ## Reading failures and partial input.
+
+(defn- thrown-class
+  [f]
+  (try (f) nil (catch Exception e (class e))))
+
+(deftest truncated-input-is-an-end-of-file
+  (doseq [input ["" "5:abc" "i42" "l" "d3:ham" "d3:ham4:eggs" "3" "-" "5:"]]
+    (is (= eof-exception (thrown-class #(>input input :reader read-bencode)))
+        (pr-str input)))
+  (testing "a netstring without its comma"
+    (is (= eof-exception (thrown-class #(>input "1:a" :reader read-netstring)))))
+  (testing "messages"
+    (is (= "Invalid netstring. Unexpected end of input."
+           (ex-message (try (>input "" :reader read-bencode) (catch Exception e e)))))
+    (is (= "Invalid netstring. Less data available than expected."
+           (ex-message (try (>input "5:abc" :reader read-bencode) (catch Exception e e)))))
+    (is (= "Invalid bencode map. Unexpected end of input."
+           (ex-message (try (>input "d3:hame" :reader read-bencode) (catch Exception e e)))))))
+
+(deftest netstring-needs-its-comma
+  (is (= io-exception (thrown-class #(>input "1:ax" :reader read-netstring))))
+  (is (= "Invalid netstring. ',' expected."
+         (ex-message (try (>input "1:ax" :reader read-netstring) (catch Exception e e))))))
+
+(deftest nrepl-messages-are-maps
+  (is (= {"op" "eval"} (<bytes (>input "d2:op4:evale" :reader read-nrepl-message))))
+  (let [e (try (>input "i1e" :reader read-nrepl-message) (catch Exception e e))]
+    (is (instance? clojure.lang.ExceptionInfo e))
+    (is (re-find #"nREPL message must be a map" (ex-message e)))
+    (is (re-find #"Wrong first byte: 105 \(must be 100\)" (ex-message e)))))
+
+(defn- pipe
+  []
+  #?(:clj (let [in (PipedInputStream.)]
+            {:in in :out (PipedOutputStream. in)})
+     :cljr (let [server (AnonymousPipeServerStream. PipeDirection/Out)]
+             {:in (AnonymousPipeClientStream. PipeDirection/In (.ClientSafePipeHandle server))
+              :out server})))
+
+(defn- write-piece
+  [out ^String s]
+  (let [^bytes b (>bytes s)]
+    #?(:clj (doto ^java.io.OutputStream out (.write b 0 (alength b)) .flush)
+       :cljr (doto ^System.IO.Stream out (.Write b (int 0) (alength b)) .Flush))))
+
+(deftest data-that-arrives-in-pieces-is-reassembled
+  (let [{:keys [in out]} (pipe)
+        reader (spawn #(<bytes (read-bencode (io/pushback-input-stream in))))]
+    (doseq [piece ["d3:ham1" "0:eg" "gs" "plant!" "e"]]
+      (write-piece out piece)
+      (is (not (realized? reader)))
+      (sleep-ms 100))
+    (is (= {"ham" "eggsplant!"} (await-result reader)))
+    (io/close! out)))
 
 ;; ## Generative testing.
 ;;
@@ -229,9 +311,11 @@
 
 (defn- encoded-latin1
   [write-fn value]
-  (let [out (ByteArrayOutputStream.)]
+  (let [out (io/byte-sink)]
     (write-fn out value)
-    (String. (.toByteArray out) "ISO-8859-1")))
+    (let [b (io/sink->bytes out)]
+      #?(:clj (String. ^bytes b "ISO-8859-1")
+         :cljr (.GetString Encoding/Latin1 ^bytes b)))))
 
 (deftest write-path-exact-bytes-test
   (testing "netstring: length digits, colon, content, trailing comma"
@@ -248,14 +332,15 @@
                 "5:z/key" "6:stream"
                 "e")
            (encoded-latin1 write-bencode
-                           {:z/key (ByteArrayInputStream. (>bytes "stream"))
+                           {:z/key (input-stream (>bytes "stream"))
                             'a-sym 'ns/sym
                             "list" [1 -42 0 "\u00e9" :kw 'sym nil]
                             "bytes" (byte-array [1 2 3])
                             "array" (object-array ["x" 2])
                             "map" {"nested" {}}
-                            "ints" [(int 2) (short 3) (byte 4) 5N (biginteger 6)
-                                    Long/MAX_VALUE]
+                            "ints" [(int 2) (short 3) (byte 4) 5N
+                                    #?(:clj (biginteger 6) :cljr 6N)
+                                    #?(:clj Long/MAX_VALUE :cljr Int64/MaxValue)]
                             "empty" ["" (byte-array 0)]})))))
 
 ;; ## Performance testing

@@ -1,0 +1,136 @@
+(ns nrepl.util.reflect.clr
+  "internal host seam"
+  {:no-doc true}
+  (:require
+   [clojure.string :as str])
+  (:import
+   (clojure.lang IType RT)
+   (System.IO Directory Path)
+   (System.Reflection Assembly BindingFlags ConstructorInfo EventInfo FieldInfo
+                      MemberInfo MethodInfo PropertyInfo
+                      ReflectionTypeLoadException)))
+
+(defn resolve-class
+  [ns sym]
+  (let [v (ns-resolve ns sym)]
+    (when (class? v)
+      v)))
+
+(defn class-name
+  [^Type c]
+  (str c))
+
+(defn simple-name
+  [^Type c]
+  (.Name c))
+
+(defn package-name
+  [^Type c]
+  (.Namespace c))
+
+(defn- member-map
+  [^MemberInfo m kind static?]
+  {:name (.Name m)
+   :kind kind
+   :static? (boolean static?)
+   :declaring-class (.DeclaringType m)
+   :member m})
+
+(defn- accessor-static?
+  [^MethodInfo accessor]
+  (and accessor (.IsStatic accessor)))
+
+(defn members
+  [^Type c]
+  (concat (for [^MethodInfo m (.GetMethods c)
+                :when (not (.IsSpecialName m))]
+            (member-map m :method (.IsStatic m)))
+          (for [^FieldInfo f (.GetFields c)]
+            (member-map f :field (.IsStatic f)))
+          (for [^ConstructorInfo k (.GetConstructors c)]
+            (assoc (member-map k :constructor false) :name "new"))
+          (for [^PropertyInfo p (.GetProperties c)]
+            (member-map p :property
+                        (or (accessor-static? (.GetMethod p))
+                            (accessor-static? (.SetMethod p)))))
+          (for [^EventInfo e (.GetEvents c)]
+            (member-map e :event (accessor-static? (.AddMethod e))))))
+
+(defn deftype-field?
+  [member ^Type c]
+  (and (= :field (:kind member))
+       (.IsAssignableFrom IType c)))
+
+(defn- load-path
+  ^String []
+  (or (Environment/GetEnvironmentVariable RT/ClojureLoadPathString) ""))
+
+(defn cache-key
+  []
+  [(count (.GetAssemblies AppDomain/CurrentDomain)) (load-path)])
+
+(def ^:private clojure-extensions #{".clj" ".cljc" ".cljr"})
+
+(defn- load-path-dirs
+  []
+  (into []
+        (filter #(Directory/Exists ^String %))
+        (.Split (load-path) Path/PathSeparator StringSplitOptions/RemoveEmptyEntries)))
+
+(defn- dir-files
+  [^String dir]
+  (let [root (Path/GetFullPath dir)]
+    (for [^String file (Directory/EnumerateFiles root "*" System.IO.SearchOption/AllDirectories)
+          :when (contains? clojure-extensions (Path/GetExtension file))]
+      (-> (Path/GetRelativePath root file)
+          (.Replace Path/DirectorySeparatorChar \/)))))
+
+(defn- assembly-types
+  [^Assembly a]
+  (try
+    (.GetTypes a)
+    (catch ReflectionTypeLoadException e
+      (remove nil? (.Types e)))
+    (catch Exception _
+      [])))
+
+(defn- type-file
+  [^Type t]
+  (when (.IsPublic t)
+    (str (str/replace (.FullName t) \. \/) ".class")))
+
+(defn classpath-files
+  []
+  (let [seen (volatile! #{})
+        fresh? (fn [x]
+                 (when-not (contains? @seen x)
+                   (vswap! seen conj x)
+                   true))]
+    (-> []
+        (into (comp (mapcat dir-files) (filter fresh?)) (load-path-dirs))
+        (into (comp (mapcat assembly-types) (keep type-file) (filter fresh?))
+              (.GetAssemblies AppDomain/CurrentDomain)))))
+
+(def ^:private keyword-table-type
+  (symbol "clojure.lang.JavaConcurrentDictionary`2[clojure.lang.Symbol,System.WeakReference]"))
+
+(defmacro ^:private with-keyword-table
+  [[sym] & body]
+  `(let [~(with-meta sym {:tag keyword-table-type}) ~sym]
+     ~@body))
+
+(def ^:private keyword-table-field
+  (delay (.GetField clojure.lang.Keyword "_symKeyMap"
+                    (enum-or BindingFlags/NonPublic BindingFlags/Static))))
+
+(defn all-keywords
+  []
+  (let [^FieldInfo field @keyword-table-field
+        table (.GetValue field nil)]
+    (with-keyword-table [table]
+      (keep (fn [^WeakReference r] (.Target r))
+            (.Values table)))))
+
+(defn resource-path
+  [s]
+  (some-> (RT/FindFile ^String s) str))

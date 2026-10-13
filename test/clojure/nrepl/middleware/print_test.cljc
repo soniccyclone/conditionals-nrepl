@@ -7,14 +7,14 @@
    These tests are transport agnostic, and do not deal with sessions, session
    IDs, and message IDs"
   (:refer-clojure :exclude [print])
-  (:require [clojure.java.io :as io]
-            [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is testing]]
             [matcher-combinators.matchers :as mc]
             [nrepl.core :refer [combine-responses]]
             [nrepl.middleware.print :as print]
-            [nrepl.test-helpers :refer [eval-in-jvm is+]]
+            [nrepl.test-helpers :as th :refer [is+ #?(:clj eval-in-jvm)]]
             [nrepl.transport :as t])
-  (:import [java.io Writer]))
+  (:import #?(:clj [java.io Writer]
+              :cljr [System.IO TextWriter])))
 
 (defn echo-handler
   [{:keys [transport] :as msg}]
@@ -46,8 +46,8 @@
        ~@body)))
 
 (defn custom-printer
-  [value ^Writer writer opts]
-  (.write writer (format "<foo %s %s>" value (or (:sub opts) "..."))))
+  [value ^#?(:clj Writer :cljr TextWriter) writer opts]
+  (#?(:clj .write :cljr .Write) writer (format "<foo %s %s>" value (or (:sub opts) "..."))))
 
 (deftest value-printing
   (testing-print "bad symbol should fall back to default printer"
@@ -175,8 +175,8 @@
                   ::print/quota   8}))))
 
 (defn custom-printer-2
-  [value ^Writer writer]
-  (.write writer (format "<bar %s>" value)))
+  [value ^#?(:clj Writer :cljr TextWriter) writer]
+  (#?(:clj .write :cljr .Write) writer (format "<bar %s>" value)))
 
 ;; These tests used to the `session-print-configuration` tests from `core-test`.
 ;; here, we are simply testing the use of dynamic vars to configure printing
@@ -236,17 +236,32 @@
 
 (deftest unicode-printing-test
   (testing-print "unicode characters are handled correctly"
-    (let [big-naughty-string (slurp (io/resource "blns.txt"))]
+    (let [big-naughty-string (slurp (th/project-file "test/blns.txt"))]
       (is+ [{:value (pr-str big-naughty-string)}
             (mc/equals {})]
            (handle {:value              big-naughty-string
                     ;; Enable streaming printer to force the usage
                     ;; of replying-PrintWriter.
                     ::print/stream?     1
-                    ::print/buffer-size 100000})))))
+                    ::print/buffer-size 100000}))))
 
-(def ^:private e-acute-roundtrip-code
-  "(require 'nrepl.middleware.print 'nrepl.transport)
+  (testing-print "a surrogate pair is never split across chunks"
+    (let [clef (str (char 0xD834) (char 0xDD1E))
+          value (apply str (repeat 12 (str "ab" clef)))
+          values (->> (handle {:value              value
+                               ::print/stream?     1
+                               ::print/buffer-size 7})
+                      (keep :value))
+          high? #(<= 0xD800 (int %) 0xDBFF)
+          low? #(<= 0xDC00 (int %) 0xDFFF)]
+      (is (< 1 (count values)))
+      (is (= (pr-str value) (apply str values)))
+      (is (not-any? #(high? (last %)) values))
+      (is (not-any? #(low? (first %)) values)))))
+
+#?(:clj
+   (def ^:private e-acute-roundtrip-code
+     "(require 'nrepl.middleware.print 'nrepl.transport)
    (let [got (atom [])
          transport (nrepl.transport/fn-transport nil #(swap! got conj %))
          w (nrepl.middleware.print/replying-PrintWriter
@@ -254,10 +269,11 @@
      (.write w (str (char 0xe9)))
      (.flush w)
      (println \"RESULT\" (pr-str (mapv int (apply str (map :out @got)))))
-     (shutdown-agents))")
+     (shutdown-agents))"))
 
-(deftest replying-print-writer-encodes-utf-8-regardless-of-default-charset
-  (let [{:keys [out]} (eval-in-jvm {"file.encoding" "ISO-8859-1"}
-                                   e-acute-roundtrip-code 120000)]
-    (is (= [0xe9] (some->> out (re-find #"RESULT (\[[0-9 ]*\])") second read-string))
-        out)))
+#?(:clj
+   (deftest replying-print-writer-encodes-utf-8-regardless-of-default-charset
+     (let [{:keys [out]} (eval-in-jvm {"file.encoding" "ISO-8859-1"}
+                                      e-acute-roundtrip-code 120000)]
+       (is (= [0xe9] (some->> out (re-find #"RESULT (\[[0-9 ]*\])") second read-string))
+           out))))

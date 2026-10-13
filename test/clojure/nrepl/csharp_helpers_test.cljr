@@ -1,0 +1,451 @@
+(ns nrepl.csharp-helpers-test
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]])
+  (:import (System.IO MemoryStream StreamWriter StringWriter TextWriter)
+           (System.Text Encoding)
+           (System.Threading Thread ThreadInterruptedException ThreadStart)))
+
+(defn- dll-path ^String []
+  (let [env (Environment/GetEnvironmentVariable "NREPL_CSHARP_DLL")]
+    (if (and env (not= "" env))
+      env
+      (let [^System.IO.FileInfo f (clojure.lang.RT/FindFile "nrepl/util/io.cljc")
+            src (-> f .Directory .Parent .Parent .Parent)]
+        (System.IO.Path/Combine (.FullName src)
+                                "csharp/nrepl/bin/Release/netstandard2.0/nrepl.dll")))))
+
+(System.Reflection.Assembly/LoadFrom (dll-path))
+
+(import '(nrepl QueuePollingReader CallbackBufferedWriter QuotaBoundWriter
+                QuotaExceededException TeeWriter))
+
+(def ^:private wait-ms 5000)
+
+(defn- on-thread [f]
+  (let [result (promise)
+        t (Thread. (gen-delegate ThreadStart []
+                                 (try
+                                   (deliver result {:value (f)})
+                                   (catch Exception e
+                                     (deliver result {:error e})))))]
+    (set! (.IsBackground t) true)
+    (.Start t)
+    {:thread t :result result}))
+
+(defn- await-result [{:keys [result]}]
+  (let [r (deref result wait-ms ::timeout)]
+    (cond (= ::timeout r) ::timeout
+          (:error r) (throw (:error r))
+          :else (:value r))))
+
+(defn- bounded [f]
+  (await-result (on-thread f)))
+
+(defn- wait-until [pred]
+  (loop [n 0]
+    (cond (pred) true
+          (> n 1000) false
+          :else (do (Thread/Sleep (int 5)) (recur (inc n))))))
+
+(defn- action ^System.Action [f]
+  (gen-delegate System.Action [] (f)))
+
+(defmacro ^:private string-callback [[arg] & body]
+  `(gen-delegate ~(symbol "System.Action`1[System.String]") [~arg] ~@body))
+
+(defn- collector []
+  (let [chunks (atom [])]
+    [chunks
+     (string-callback [s]
+                      (swap! chunks conj s))]))
+
+(defn- new-reader [calls]
+  (QueuePollingReader. (action #(swap! calls inc))))
+
+(deftest reader-eof-rules
+  (testing "Read() is -1 at EOF and does not ask for input"
+    (let [calls (atom 0)
+          ^QueuePollingReader r (new-reader calls)]
+      (.AddEof r)
+      (is (= -1 (bounded #(.Read r))))
+      (is (= 0 @calls))))
+  (testing "bulk Read returns 0 at EOF, after the queued chars"
+    (let [^QueuePollingReader r (new-reader (atom 0))
+          buf (char-array 10)]
+      (.AddInput r "ab")
+      (.AddEof r)
+      (is (= 2 (bounded #(.Read r buf (int 0) (int 10)))))
+      (is (= "ab" (String. buf (int 0) (int 2))))
+      (is (= 0 (bounded #(.Read r buf (int 0) (int 10)))))))
+  (testing "bulk Read of count 0 returns 0 without blocking or asking for input"
+    (let [calls (atom 0)
+          ^QueuePollingReader r (new-reader calls)
+          buf (char-array 10)]
+      (is (= 0 (bounded #(.Read r buf (int 0) (int 0)))))
+      (is (= 0 @calls)))))
+
+(deftest reader-bulk-read-takes-only-queued-chars
+  (let [calls (atom 0)
+        ^QueuePollingReader r (new-reader calls)
+        buf (char-array 10)]
+    (.AddInput r "abc")
+    (is (= 2 (bounded #(.Read r buf (int 0) (int 2)))))
+    (is (= "ab" (String. buf (int 0) (int 2))))
+    (is (= 1 (bounded #(.Read r buf (int 0) (int 10)))))
+    (is (= \c (aget buf 0)))
+    (is (= 0 @calls))
+    (.AddInput r "d")
+    (.AddInput r "ef")
+    (is (= 3 (bounded #(.Read r buf (int 0) (int 10)))))
+    (is (= "def" (String. buf (int 0) (int 3))))
+    (is (= 0 @calls))))
+
+(deftest reader-peek-is-non-blocking
+  (testing "Peek on an empty reader is -1 and neither blocks nor asks for input"
+    (let [calls (atom 0)
+          ^QueuePollingReader r (new-reader calls)]
+      (is (= -1 (bounded #(.Peek r))))
+      (is (= 0 @calls))
+      (is (false? (bounded #(.Ready r))))))
+  (testing "Peek sees queued input without consuming it"
+    (let [^QueuePollingReader r (new-reader (atom 0))]
+      (.AddInput r "xy")
+      (is (= (int \x) (bounded #(.Peek r))))
+      (is (= (int \x) (bounded #(.Peek r))))
+      (is (true? (bounded #(.Ready r))))
+      (is (= (int \x) (bounded #(.Read r))))
+      (is (= (int \y) (bounded #(.Peek r))))
+      (is (= (int \y) (bounded #(.Read r))))
+      (is (= -1 (bounded #(.Peek r))))))
+  (testing "Peek at EOF is -1 and leaves the marker for the next Read"
+    (let [^QueuePollingReader r (new-reader (atom 0))]
+      (.AddEof r)
+      (is (= -1 (bounded #(.Peek r))))
+      (is (= -1 (bounded #(.Peek r))))
+      (is (= -1 (bounded #(.Read r)))))))
+
+(deftest reader-asks-for-input-when-a-read-finds-the-queue-empty
+  (let [calls (atom 0)
+        ^QueuePollingReader r (new-reader calls)
+        h (on-thread #(.Read r))]
+    (is (wait-until #(= 1 @calls)))
+    (Thread/Sleep (int 50))
+    (is (= 1 @calls))
+    (is (not (realized? (:result h))))
+    (.AddInput r "zq")
+    (is (= (int \z) (await-result h)))
+    (is (= 1 @calls))
+    (is (= (int \q) (bounded #(.Read r))))
+    (is (= 1 @calls))
+    (let [h2 (on-thread #(.Read r))]
+      (is (wait-until #(= 2 @calls)))
+      (.AddEof r)
+      (is (= -1 (await-result h2)))
+      (is (= 2 @calls)))))
+
+(deftest reader-bulk-read-asks-for-input-once
+  (let [calls (atom 0)
+        ^QueuePollingReader r (new-reader calls)
+        buf (char-array 10)
+        h (on-thread #(.Read r buf (int 0) (int 10)))]
+    (is (wait-until #(= 1 @calls)))
+    (.AddInput r "ab")
+    (is (= 2 (await-result h)))
+    (is (= 1 @calls))))
+
+(deftest reader-interrupt-while-blocked
+  (let [calls (atom 0)
+        ^QueuePollingReader r (new-reader calls)
+        h (on-thread (fn []
+                       [(.Read r)
+                        (try (Thread/Sleep (int 1))
+                             :slept
+                             (catch ThreadInterruptedException _
+                               :interrupted))]))]
+    (is (wait-until #(= 1 @calls)))
+    (.Interrupt ^Thread (:thread h))
+    (is (= [-1 :interrupted] (await-result h)))))
+
+(deftest reader-bulk-read-interrupt-while-blocked
+  (let [calls (atom 0)
+        ^QueuePollingReader r (new-reader calls)
+        buf (char-array 4)
+        h (on-thread (fn []
+                       [(.Read r buf (int 0) (int 4))
+                        (try (Thread/Sleep (int 1))
+                             :slept
+                             (catch ThreadInterruptedException _
+                               :interrupted))]))]
+    (is (wait-until #(= 1 @calls)))
+    (.Interrupt ^Thread (:thread h))
+    (is (= [0 :interrupted] (await-result h)))))
+
+(deftest reader-dispose-clears-the-queue
+  (let [^QueuePollingReader r (new-reader (atom 0))]
+    (.AddInput r "abc")
+    (.Dispose r)
+    (is (= -1 (bounded #(.Peek r))))))
+
+(deftest reader-under-line-numbering-text-reader
+  (testing "lines, line numbers and EOF"
+    (let [^QueuePollingReader r (new-reader (atom 0))
+          ^clojure.lang.LineNumberingTextReader lr (clojure.lang.LineNumberingTextReader. r)]
+      (.AddInput r "foo\nba")
+      (.AddInput r "r\n")
+      (.AddEof r)
+      (is (= "foo" (bounded #(.ReadLine lr))))
+      (is (= "bar" (bounded #(.ReadLine lr))))
+      (is (= 3 (.LineNumber lr)))
+      (is (nil? (bounded #(.ReadLine lr))))))
+  (testing "a trailing carriage return does not block on Peek"
+    (let [calls (atom 0)
+          ^QueuePollingReader r (new-reader calls)
+          ^clojure.lang.LineNumberingTextReader lr (clojure.lang.LineNumberingTextReader. r)]
+      (.AddInput r "a\r")
+      (is (= "a" (bounded #(.ReadLine lr))))
+      (is (= 0 @calls)))))
+
+(defn- chars-of ^chars [^String s]
+  (.ToCharArray s))
+
+(defn- codes [chunks]
+  (mapv #(mapv int %) chunks))
+
+(defn- ends-in-high-surrogate? [^String s]
+  (Char/IsHighSurrogate s (int (dec (count s)))))
+
+(deftest callback-writer-chunking
+  (testing "complete lines go out, the partial tail stays until flushed"
+    (let [[chunks cb] (collector)
+          ^TextWriter w (CallbackBufferedWriter. cb (int 1024))]
+      (.Write w "a\nb\nc")
+      (is (= ["a\nb\n"] @chunks))
+      (.Flush w)
+      (is (= ["a\nb\n" "c"] @chunks))))
+  (testing "Write(char) hands over at a newline"
+    (let [[chunks cb] (collector)
+          ^TextWriter w (CallbackBufferedWriter. cb (int 1024))]
+      (.Write w \a)
+      (.Write w \newline)
+      (.Write w \b)
+      (is (= ["a\n"] @chunks))))
+  (testing "Write(char[], int, int) respects the slice"
+    (let [[chunks cb] (collector)
+          ^TextWriter w (CallbackBufferedWriter. cb (int 1024))]
+      (.Write w (chars-of "xxab\ncdyy") (int 2) (int 5))
+      (is (= ["ab\n"] @chunks))
+      (.Flush w)
+      (is (= ["ab\n" "cd"] @chunks))))
+  (testing "WriteLine arrives as one line"
+    (let [[chunks cb] (collector)
+          ^TextWriter w (CallbackBufferedWriter. cb (int 1024))]
+      (.WriteLine w "hi")
+      (is (= [(str "hi" Environment/NewLine)] @chunks))))
+  (testing "a full buffer is handed over without a newline"
+    (let [[chunks cb] (collector)
+          ^TextWriter w (CallbackBufferedWriter. cb (int 4))]
+      (.Write w "abcdefghij")
+      (is (= ["abcd" "efgh"] @chunks))
+      (.Flush w)
+      (is (= ["abcd" "efgh" "ij"] @chunks))))
+  (testing "Write(char) fills a buffer too"
+    (let [[chunks cb] (collector)
+          ^TextWriter w (CallbackBufferedWriter. cb (int 3))]
+      (doseq [c "abcdefg"] (.Write w ^Char c))
+      (is (= ["abc" "def"] @chunks))))
+  (testing "Dispose hands over the rest; Encoding is UTF-8; ToString shows the pending text"
+    (let [[chunks cb] (collector)
+          ^TextWriter w (CallbackBufferedWriter. cb (int 1024))]
+      (is (= Encoding/UTF8 (.Encoding w)))
+      (.Write w "tail")
+      (is (= "tail" (.ToString w)))
+      (is (= [] @chunks))
+      (.Dispose w)
+      (is (= ["tail"] @chunks))
+      (is (= "" (.ToString w))))))
+
+(def ^:private clef "𝄞")
+
+(defn- surrogate-input [offset]
+  (str (apply str (repeat offset "a")) clef (apply str (repeat 25 "b"))))
+
+(defn- chunks-ok? [input chunks]
+  (and (= input (apply str chunks))
+       (every? seq chunks)
+       (not-any? ends-in-high-surrogate? chunks)))
+
+(defn- write-all [^TextWriter w ^String input mode]
+  (case mode
+    :string (.Write w input)
+    :array (let [arr (chars-of input)]
+             (.Write w arr (int 0) (count arr)))
+    :char (doseq [c input] (.Write w ^Char c))
+    :array-pieces (let [arr (chars-of input)]
+                    (doseq [start (range 0 (count arr) 3)]
+                      (.Write w arr (int start) (int (min 3 (- (count arr) start))))))))
+
+(deftest callback-writer-never-splits-a-surrogate-pair
+  (doseq [size (range 10 21)
+          offset (range 0 (+ size 6))
+          mode [:string :array :char :array-pieces]]
+    (let [[chunks cb] (collector)
+          ^TextWriter w (CallbackBufferedWriter. cb (int size))
+          input (surrogate-input offset)]
+      (write-all w input mode)
+      (.Dispose w)
+      (let [ok (chunks-ok? input @chunks)]
+        (is ok (pr-str {:size size :offset offset :mode mode :chunks (codes @chunks)}))))))
+
+(deftest callback-writer-flush-keeps-a-lone-high-surrogate
+  (let [[chunks cb] (collector)
+        ^TextWriter w (CallbackBufferedWriter. cb (int 1024))]
+    (.Write w "ab")
+    (.Write w (char 0xD834))
+    (.Flush w)
+    (is (= [[97 98]] (codes @chunks)))
+    (.Write w (char 0xDD1E))
+    (.Flush w)
+    (is (= [[97 98] [0xD834 0xDD1E]] (codes @chunks)))))
+
+(deftest callback-writer-dispose-hands-over-a-lone-high-surrogate
+  (let [[chunks cb] (collector)
+        ^TextWriter w (CallbackBufferedWriter. cb (int 1024))]
+    (.Write w "ab")
+    (.Write w (char 0xD834))
+    (.Dispose w)
+    (is (= [[97 98 0xD834]] (codes @chunks)))))
+
+(deftest callback-writer-is-thread-safe
+  (let [chunks (atom [])
+        cb (string-callback [s]
+                            (Thread/Sleep (int 0))
+                            (swap! chunks conj s))
+        ^TextWriter w (CallbackBufferedWriter. cb (int 64))
+        per-thread 5000
+        hs (doall (for [t (range 8)]
+                    (on-thread (fn []
+                                 (dotimes [i per-thread]
+                                   (.Write w (str "t" t "-" i "\n")))))))]
+    (doseq [h hs] (await-result h))
+    (.Dispose w)
+    (let [lines (str/split-lines (apply str @chunks))]
+      (is (= (* 8 per-thread) (count lines)))
+      (is (= (set (for [t (range 8) i (range per-thread)] (str "t" t "-" i)))
+             (set lines))))))
+
+(deftest quota-writer-truncates-at-the-quota
+  (testing "exactly the quota reaches the callback, then the exception, with Exceeded set"
+    (let [[chunks cb] (collector)
+          ^QuotaBoundWriter w (QuotaBoundWriter. (CallbackBufferedWriter. cb (int 1024)) (int 5))]
+      (.Write w "abc")
+      (is (false? (.Exceeded w)))
+      (is (thrown? QuotaExceededException (.Write w "defgh")))
+      (is (true? (.Exceeded w)))
+      (.Dispose w)
+      (is (= ["abcde"] @chunks))))
+  (testing "writing exactly the quota is fine"
+    (let [[chunks cb] (collector)
+          ^QuotaBoundWriter w (QuotaBoundWriter. (CallbackBufferedWriter. cb (int 1024)) (int 5))]
+      (.Write w "abcde")
+      (is (false? (.Exceeded w)))
+      (is (thrown? QuotaExceededException (.Write w \f)))
+      (is (true? (.Exceeded w)))
+      (.Dispose w)
+      (is (= ["abcde"] @chunks))))
+  (testing "Write(char) counts one each"
+    (let [[chunks cb] (collector)
+          ^QuotaBoundWriter w (QuotaBoundWriter. (CallbackBufferedWriter. cb (int 1024)) (int 2))]
+      (.Write w \a)
+      (.Write w \b)
+      (is (thrown? QuotaExceededException (.Write w \c)))
+      (.Dispose w)
+      (is (= ["ab"] @chunks))))
+  (testing "Write(char[], int, int) writes the allowed prefix of the slice"
+    (let [[chunks cb] (collector)
+          ^QuotaBoundWriter w (QuotaBoundWriter. (CallbackBufferedWriter. cb (int 1024)) (int 3))]
+      (is (thrown? QuotaExceededException (.Write w (chars-of "xabcdefy") (int 1) (int 6))))
+      (.Dispose w)
+      (is (= ["abc"] @chunks))))
+  (testing "a catch that swallows the exception still leaves Exceeded set, on every write path"
+    (doseq [write [#(.Write ^TextWriter % "toolong")
+                   #(.Write ^TextWriter % (chars-of "toolong") (int 0) (int 7))
+                   #(do (.Write ^TextWriter % "abc") (.Write ^TextWriter % \d))]]
+      (let [^QuotaBoundWriter w (QuotaBoundWriter. (StringWriter.) (int 3))]
+        (try (write w) (catch QuotaExceededException _ nil))
+        (is (true? (.Exceeded w))))))
+  (testing "Dispose disposes the wrapped writer"
+    (let [ms (MemoryStream.)
+          ^QuotaBoundWriter w (QuotaBoundWriter. (StreamWriter. ms) (int 10))]
+      (.Write w "abc")
+      (.Dispose w)
+      (is (false? (.CanWrite ms)))))
+  (testing "a non-positive quota is rejected"
+    (is (thrown? ArgumentException (QuotaBoundWriter. (StringWriter.) (int 0))))
+    (is (thrown? ArgumentException (QuotaBoundWriter. (StringWriter.) (int -1)))))
+  (testing "ToString is the wrapped writer's"
+    (let [^QuotaBoundWriter w (QuotaBoundWriter. (StringWriter.) (int 10))]
+      (.Write w "hello")
+      (is (= "hello" (.ToString w))))))
+
+(deftest quota-writer-disposes-before-the-enclosing-catch
+  (let [order (atom [])
+        cb (string-callback [s]
+                            (swap! order conj [:chunk s]))]
+    (try
+      (with-open [w (QuotaBoundWriter. (CallbackBufferedWriter. cb (int 1024)) (int 5))]
+        (.Write ^TextWriter w "abcdefgh"))
+      (catch QuotaExceededException _
+        (swap! order conj :caught)))
+    (is (= [[:chunk "abcde"] :caught] @order))))
+
+(deftest tee-writer-forwards-to-both
+  (testing "the original gets everything, the callback complete lines"
+    (let [[chunks cb] (collector)
+          orig (StringWriter.)
+          ^TextWriter w (TeeWriter. orig (CallbackBufferedWriter. cb (int 1024)))]
+      (.Write w "a\nb")
+      (.Write w \c)
+      (.Write w (chars-of "xde\nfy") (int 1) (int 4))
+      (.WriteLine w "g")
+      (is (= (str "a\nbcde\nf" "g" Environment/NewLine) (str orig)))
+      (is (= ["a\n" "bcde\n" (str "fg" Environment/NewLine)] @chunks))
+      (.Write w "tail")
+      (.Flush w)
+      (is (= (str "a\nbcde\nfg" Environment/NewLine "tail") (str orig)))
+      (is (= "tail" (peek @chunks)))))
+  (testing "Dispose hands the callback side its tail"
+    (let [[chunks cb] (collector)
+          ^TextWriter w (TeeWriter. (StringWriter.) (CallbackBufferedWriter. cb (int 1024)))]
+      (.Write w "x")
+      (.Dispose w)
+      (is (= ["x"] @chunks)))))
+
+(deftest tee-writer-flushes-the-original-on-newline
+  (let [[chunks cb] (collector)
+        ms (MemoryStream.)
+        orig (StreamWriter. ms (System.Text.UTF8Encoding. false) (int 4096))
+        ^TextWriter w (TeeWriter. orig (CallbackBufferedWriter. cb (int 1024)))]
+    (.Write w "abc")
+    (is (= 0 (.Length ms)))
+    (.Write w "d\nxy")
+    (is (= 7 (.Length ms)))
+    (is (= ["abcd\n"] @chunks))))
+
+(deftest tee-writer-does-not-recurse-on-flush
+  (let [tee (atom nil)
+        depth (atom 0)
+        flushes (atom 0)
+        orig (proxy [StringWriter] []
+               (Flush []
+                 (swap! flushes inc)
+                 (when (and @tee (< @depth 20))
+                   (swap! depth inc)
+                   (try (.Flush ^TextWriter @tee)
+                        (finally (swap! depth dec))))))
+        ^TextWriter w (TeeWriter. orig (StringWriter.))]
+    (reset! tee w)
+    (.Flush w)
+    (is (= 1 @flushes))
+    (reset! flushes 0)
+    (.Write w "line\n")
+    (is (= 1 @flushes))))

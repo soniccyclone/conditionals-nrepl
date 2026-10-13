@@ -1,0 +1,29 @@
+(ns nrepl.tls
+  "TLS is not available on ClojureCLR yet: every function that would need it
+  throws, except `handshake-exception?`."
+  {:added "1.1"})
+
+(defn- unsupported
+  []
+  (throw (ex-info "TLS is not supported on ClojureCLR yet"
+                  {:nrepl/kind :nrepl.tls/tls-unsupported})))
+
+(defn ssl-context-or-throw
+  [_tls-keys-str _tls-keys-file]
+  (unsupported))
+
+(defn handshake-exception?
+  [_e]
+  false)
+
+(defn server-socket
+  [_context _host _port]
+  (unsupported))
+
+(defn socket
+  [_context _host _port _connect-timeout-ms]
+  (unsupported))
+
+(defn accept
+  [_server]
+  (unsupported))

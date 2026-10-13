@@ -1,0 +1,287 @@
+(ns nrepl.util.threading.clr
+  "internal host seam"
+  {:no-doc true}
+  (:require
+   [nrepl.config :refer [config]]
+   [nrepl.misc :as misc])
+  (:import
+   (System OperationCanceledException)
+   (System.Diagnostics Stopwatch)
+   (System.Runtime ControlledExecution)
+   (System.Threading CancellationTokenSource Monitor ParameterizedThreadStart Thread
+                     ThreadAbortException ThreadInterruptedException Timeout)))
+
+(def infinite-ms Timeout/Infinite)
+
+(def ^:dynamic ^:private *current-handle* nil)
+
+(deftype TaskHandle [cancelled thread])
+
+(deftype SessionThread [^Thread thread cts-slot body])
+
+(def ^:private ^ParameterizedThreadStart thread-main
+  (gen-delegate ParameterizedThreadStart [f] (f)))
+
+(def ^:dynamic ^:private *body* nil)
+
+(def ^:private run-body
+  (gen-delegate System.Action []
+                (let [box *body*]
+                  (vreset! box ((deref box))))))
+
+(deftype Executor [name-fmt counter])
+
+(deftype Rendezvous [lock state])
+
+(def ^:private blocking-collection-type
+  (symbol "System.Collections.Concurrent.BlockingCollection`1[System.Object]"))
+
+(defmacro ^:private new-blocking-collection
+  []
+  `(new ~blocking-collection-type))
+
+(defmacro ^:private with-blocking-collection
+  [[sym] & body]
+  `(let [~(with-meta sym {:tag blocking-collection-type}) ~sym]
+     ~@body))
+
+(defn- handle-cancelled?
+  [^TaskHandle handle]
+  (boolean (and handle @(.cancelled handle))))
+
+(defn- ms->timeout
+  [ms]
+  (cond
+    (or (= ms infinite-ms) (> ms Int32/MaxValue)) Timeout/Infinite
+    (neg? ms) 0
+    :else (int ms)))
+
+(defn- run-guarded
+  [handle f]
+  (try
+    (f)
+    (catch Exception e
+      (when-not (and (instance? ThreadInterruptedException e)
+                     (handle-cancelled? handle))
+        (try
+          (misc/log e "Uncaught exception on thread" (.Name Thread/CurrentThread))
+          (catch Exception _))))))
+
+(defn- start-thread!
+  [^String name handle f]
+  (let [t (Thread. thread-main)]
+    (set! (.IsBackground t) true)
+    (set! (.Name t) name)
+    (.Start t (fn [] (run-guarded handle f)))
+    t))
+
+(defn make-executor
+  [{:keys [name-fmt]}]
+  (Executor. name-fmt (atom -1)))
+
+(defn submit!
+  [executor f]
+  (let [^Executor executor executor
+        handle (TaskHandle. (atom false) (atom nil))
+        name (format (.name-fmt executor) (swap! (.counter executor) inc))
+        t (start-thread! name handle (fn []
+                                       (binding [*current-handle* handle]
+                                         (f))))]
+    (reset! (.thread handle) t)
+    handle))
+
+(defn cancel!
+  [handle]
+  (let [^TaskHandle handle handle]
+    (reset! (.cancelled handle) true)
+    (when-let [^Thread t (deref (.thread handle))]
+      (.Interrupt t))
+    nil))
+
+(defn cancelled?
+  []
+  (handle-cancelled? *current-handle*))
+
+(defn cancel-current!
+  []
+  (when-let [^TaskHandle handle *current-handle*]
+    (reset! (.cancelled handle) true))
+  nil)
+
+(defn make-queue
+  []
+  (new-blocking-collection))
+
+(defn make-rendezvous
+  []
+  (Rendezvous. (Object.) (volatile! {:full? false :item nil :put-seq 0 :taken-seq 0})))
+
+(defn- rendezvous-pop!
+  [^Rendezvous q]
+  (let [state (.state q)
+        {:keys [item put-seq]} @state]
+    (vswap! state assoc :full? false :item nil :taken-seq put-seq)
+    (Monitor/PulseAll (.lock q))
+    item))
+
+(defn- rendezvous-put!
+  [^Rendezvous q x]
+  (let [lock (.lock q)
+        state (.state q)]
+    (locking lock
+      (loop []
+        (when (and (:full? @state) (not (cancelled?)))
+          (Monitor/Wait lock)
+          (recur)))
+      (when-not (cancelled?)
+        (let [put-seq (inc (:put-seq @state))]
+          (vswap! state assoc :full? true :item x :put-seq put-seq)
+          (Monitor/PulseAll lock)
+          (try
+            (loop []
+              (when (and (< (:taken-seq @state) put-seq) (not (cancelled?)))
+                (Monitor/Wait lock)
+                (recur)))
+            (finally
+              (when (< (:taken-seq @state) put-seq)
+                (vswap! state assoc :full? false :item nil)
+                (Monitor/PulseAll lock)))))))
+    nil))
+
+(defn- rendezvous-take!
+  [^Rendezvous q]
+  (let [lock (.lock q)
+        state (.state q)]
+    (locking lock
+      (loop []
+        (if (:full? @state)
+          (rendezvous-pop! q)
+          (do (Monitor/Wait lock)
+              (recur)))))))
+
+(defn- rendezvous-poll!
+  ([^Rendezvous q]
+   (locking (.lock q)
+     (when (:full? @(.state q))
+       (rendezvous-pop! q))))
+  ([^Rendezvous q timeout]
+   (if (= timeout Timeout/Infinite)
+     (rendezvous-take! q)
+     (let [lock (.lock q)
+           state (.state q)
+           watch (Stopwatch/StartNew)]
+       (locking lock
+         (loop []
+           (if (:full? @state)
+             (rendezvous-pop! q)
+             (let [remaining (- timeout (.ElapsedMilliseconds watch))]
+               (when (pos? remaining)
+                 (Monitor/Wait lock (int remaining))
+                 (recur))))))))))
+
+(defn- queue-try-take
+  [q timeout]
+  (with-blocking-collection [q]
+    (let [item nil]
+      (when (.TryTake q (by-ref item) (int timeout))
+        item))))
+
+(defn- queue-poll-now
+  [q]
+  (queue-try-take q 0))
+
+(defn put!
+  [q x]
+  (if (instance? Rendezvous q)
+    (rendezvous-put! q x)
+    (with-blocking-collection [q]
+      (.Add q x))))
+
+(defn take!
+  [q]
+  (if (instance? Rendezvous q)
+    (rendezvous-take! q)
+    (with-blocking-collection [q]
+      (.Take q))))
+
+(defn poll!
+  ([q]
+   (if (instance? Rendezvous q)
+     (rendezvous-poll! q)
+     (queue-poll-now q)))
+  ([q timeout-ms]
+   (let [timeout (ms->timeout timeout-ms)]
+     (if (instance? Rendezvous q)
+       (rendezvous-poll! q timeout)
+       (queue-try-take q timeout)))))
+
+(def ^:private reaper-count (atom -1))
+
+(defn schedule-once!
+  [f delay-ms]
+  (let [timeout (ms->timeout delay-ms)]
+    (start-thread! (str "nREPL-thread-reaper-" (swap! reaper-count inc))
+                   nil
+                   (fn []
+                     (Thread/Sleep (int timeout))
+                     (f)))
+    nil))
+
+(defn session-thread
+  [name run-fn]
+  (let [max-stack (get-in config [:thread-opts :max-stack-size])
+        t (if max-stack
+            (Thread. thread-main (int max-stack))
+            (Thread. thread-main))]
+    (set! (.IsBackground t) true)
+    (set! (.Name t) (str name))
+    (SessionThread. t (atom nil) (fn [] (run-guarded nil run-fn)))))
+
+(defn start-session-thread!
+  [sthread]
+  (let [^SessionThread sthread sthread
+        ^Thread t (.thread sthread)]
+    (.Start t (.body sthread))))
+
+(defn alive?
+  [sthread]
+  (let [^Thread t (.thread ^SessionThread sthread)]
+    (.IsAlive t)))
+
+(defn stop-exception?
+  [e]
+  (loop [^Exception e e]
+    (cond
+      (nil? e) false
+      (or (instance? ThreadAbortException e)
+          (instance? OperationCanceledException e)) true
+      :else (recur (.InnerException e)))))
+
+(defn run-interruptible*
+  [sthread f]
+  (let [slot (.cts-slot ^SessionThread sthread)
+        cts (CancellationTokenSource.)
+        box (volatile! f)]
+    (reset! slot cts)
+    (try
+      (binding [*body* box]
+        (ControlledExecution/Run run-body (.Token cts)))
+      @box
+      (catch Exception e
+        (when-not (stop-exception? e)
+          (throw e)))
+      (finally
+        (reset! slot nil)))))
+
+(defn interrupt-stop
+  [sthread delay-ms]
+  (let [^SessionThread sthread sthread
+        ^Thread t (.thread sthread)]
+    (.Interrupt t)
+    (when (:force-interrupt config true)
+      (schedule-once! (fn []
+                        (when (.IsAlive t)
+                          (.Interrupt t)
+                          (when-let [^CancellationTokenSource cts @(.cts-slot sthread)]
+                            (.Cancel cts))))
+                      delay-ms))))
