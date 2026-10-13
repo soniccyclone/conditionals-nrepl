@@ -118,11 +118,11 @@
 
 (definline ^:private utf8-bytes [s]
   #?(:clj `(.getBytes ~(with-meta s {:tag 'String}) java.nio.charset.StandardCharsets/UTF_8)
-     :cljr `(.GetBytes System.Text.Encoding/UTF8 ~s)))
+     :cljr `(.GetBytes System.Text.Encoding/UTF8 ~(with-meta s {:tag 'String}))))
 
 (definline ^:private utf8-string [b]
   #?(:clj `(String. ~(with-meta b {:tag 'bytes}) java.nio.charset.StandardCharsets/UTF_8)
-     :cljr `(.GetString System.Text.Encoding/UTF8 ~b)))
+     :cljr `(.GetString System.Text.Encoding/UTF8 ~(with-meta b {:tag 'bytes}))))
 
 (defn- read-bytes ^bytes [^#?(:clj java.io.InputStream :cljr System.IO.Stream) input, ^long n]
   (let [content (byte-array n)]

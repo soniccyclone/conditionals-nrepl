@@ -1,6 +1,7 @@
 (ns nrepl.util.io
   "internal host seam"
   {:no-doc true}
+  #?(:cljr (:refer-clojure :exclude [array?]))
   (:require
    #?(:clj [nrepl.util.io.jvm :as impl]
       :cljr [nrepl.util.io.clr :as impl])))

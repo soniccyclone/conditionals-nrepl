@@ -15,14 +15,13 @@
    [clojure.edn :as edn]
    [clojure.walk :as walk]
    [nrepl.bencode :as bencode]
-   [nrepl.misc :refer [response-for uuid]]
+   [nrepl.misc :refer [response-for #?(:clj uuid)]]
    [nrepl.socket :as socket]
    [nrepl.util.io :as io]
    [nrepl.util.threading :as threading]
    nrepl.version)
-  (:import
-   (java.io EOFException)
-   (java.util.concurrent Semaphore)))
+  #?(:clj (:import
+           (java.util.concurrent Semaphore))))
 
 (defprotocol Transport
   "Defines the interface for a wire protocol implementation for use
@@ -38,8 +37,10 @@
   (send [this msg] (send-fn msg) this)
   (recv [this] (.recv this threading/infinite-ms))
   (recv [_this timeout] (recv-fn timeout))
-  java.io.Closeable
-  (close [_this] (close)))
+  #?@(:clj [java.io.Closeable
+            (close [_this] (close))]
+      :cljr [System.IDisposable
+             (Dispose [_this] (close))]))
 
 (defn fn-transport
   "Returns a Transport implementation that delegates its functionality
@@ -52,9 +53,9 @@
                (while (not (or @stop (threading/cancelled?)))
                  (try
                    (threading/put! read-queue (transport-read))
-                   (catch InterruptedException _
+                   (catch #?(:clj InterruptedException :cljr System.Threading.ThreadInterruptedException) _
                      (vreset! stop true))
-                   (catch Throwable t
+                   (catch #?(:clj Throwable :cljr Exception) t
                      (vreset! stop true)
                      (threading/put! read-queue t)))))]
      (FnTransport.
@@ -62,7 +63,7 @@
         #(if @failure
            (throw @failure)
            (let [msg (threading/poll! read-queue %)]
-             (if (instance? Throwable msg)
+             (if (instance? #?(:clj Throwable :cljr Exception) msg)
                (do (reset! failure msg)
                    (threading/cancel! fut)
                    (throw msg))
@@ -94,10 +95,10 @@
   [s & body]
   `(try
      ~@body
-     (catch Throwable e#
+     (catch #?(:clj Throwable :cljr Exception) e#
        (if (cond
              (socket/closed-exception? e#) true
-             (instance? EOFException e#) true
+             (instance? #?(:clj java.io.EOFException :cljr System.IO.EndOfStreamException) e#) true
              (= "EOF while reading" (ex-message e#)) true
              :else (let [s# ~s]
                      (and (satisfies? socket/Connectable s#) (not (socket/is-connected? s#)))))
@@ -164,52 +165,54 @@
             (io/close! in)
             (io/close! out))))))))
 
-(defn tty
-  "Returns a Transport implementation suitable for serving an nREPL backend
+#?(:clj
+   (defn tty
+     "Returns a Transport implementation suitable for serving an nREPL backend
    via simple in/out readers, as with a tty or telnet connection."
-  ([s] (tty s s s))
-  ([in out & [s]]
-   (let [r (io/line-numbering-reader (io/text-reader in))
-         w (io/text-writer out)
-         cns (atom "user")
-         read-sync (Semaphore. 1)
-         eval-ids (atom #{})
-         session-id (atom nil)
-         read-queue (threading/make-queue)
-         read #(or (threading/poll! read-queue)
-                   (let [id (str "eval" (uuid))]
-                     (.acquire read-sync)
-                     (swap! eval-ids conj id)
-                     {:op "eval", :code r, :ns @cns, :id id, :session @session-id}))
-         write (fn [{:keys [out err value status ns new-session id]}]
-                 (when new-session (reset! session-id new-session))
-                 (when ns (reset! cns ns))
-                 (doseq [x [out err value] :when x]
-                   (io/write-string! w x))
-                 (when (and (some #{:done "done"} status) (contains? @eval-ids id))
-                   (swap! eval-ids disj id)
-                   (io/write-string! w (str "\n" @cns "=> "))
-                   (.release read-sync))
-                 (io/flush! w))
-         close (when s
-                 #(do (threading/put! read-queue {:op "close", :session @session-id})
-                      (io/close! s)))]
-     (threading/put! read-queue {:op "clone"})
-     (fn-transport read write close))))
+     ([s] (tty s s s))
+     ([in out & [s]]
+      (let [r (io/line-numbering-reader (io/text-reader in))
+            w (io/text-writer out)
+            cns (atom "user")
+            read-sync (Semaphore. 1)
+            eval-ids (atom #{})
+            session-id (atom nil)
+            read-queue (threading/make-queue)
+            read #(or (threading/poll! read-queue)
+                      (let [id (str "eval" (uuid))]
+                        (.acquire read-sync)
+                        (swap! eval-ids conj id)
+                        {:op "eval", :code r, :ns @cns, :id id, :session @session-id}))
+            write (fn [{:keys [out err value status ns new-session id]}]
+                    (when new-session (reset! session-id new-session))
+                    (when ns (reset! cns ns))
+                    (doseq [x [out err value] :when x]
+                      (io/write-string! w x))
+                    (when (and (some #{:done "done"} status) (contains? @eval-ids id))
+                      (swap! eval-ids disj id)
+                      (io/write-string! w (str "\n" @cns "=> "))
+                      (.release read-sync))
+                    (io/flush! w))
+            close (when s
+                    #(do (threading/put! read-queue {:op "close", :session @session-id})
+                         (io/close! s)))]
+        (threading/put! read-queue {:op "clone"})
+        (fn-transport read write close)))))
 
-(defn tty-greeting
-  "A greeting fn usable with `nrepl.server/start-server`,
+#?(:clj
+   (defn tty-greeting
+     "A greeting fn usable with `nrepl.server/start-server`,
    meant to be used in conjunction with Transports returned by the
    `tty` function.
 
    Usually, Clojure-aware client-side tooling would provide this upon connecting
    to the server, but telnet et al. isn't that."
-  [transport]
-  (send transport {:out (str ";; nREPL " (:version-string nrepl.version/version)
-                             \newline
-                             ";; Clojure " (clojure-version)
-                             \newline
-                             "user=> ")}))
+     [transport]
+     (send transport {:out (str ";; nREPL " (:version-string nrepl.version/version)
+                                \newline
+                                ";; Clojure " (clojure-version)
+                                \newline
+                                "user=> ")})))
 
 (defmulti uri-scheme
   "Return the uri scheme associated with a transport var."
@@ -217,7 +220,7 @@
 
 (defmethod uri-scheme #'bencode [_] "nrepl")
 
-(defmethod uri-scheme #'tty [_] "telnet")
+#?(:clj (defmethod uri-scheme #'tty [_] "telnet"))
 
 (defmethod uri-scheme #'edn [_] "nrepl+edn")
 

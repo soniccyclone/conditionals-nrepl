@@ -14,7 +14,8 @@
    [nrepl.util.io :as io]
    [nrepl.util.threading :as threading])
   (:import
-   (clojure.lang LispReader$ReaderException)))
+   #?(:clj (clojure.lang LispReader$ReaderException)
+      :cljr (clojure.lang Compiler LispReader+ReaderException))))
 
 (def ^:dynamic *msg*
   "The message currently being evaluated."
@@ -92,7 +93,7 @@
                           (do (vreset! remaining (rest s))
                               (first s))
                           eof)))
-          caught (fn [^Throwable e]
+          caught (fn [^#?(:clj Throwable :cljr Exception) e]
                    (set! *e e)
                    (vreset! errored? true)
                    (when-not (threading/stop-exception? e)
@@ -109,8 +110,8 @@
         (loop []
           (let [input (try
                         (clojure.main/with-read-known (read))
-                        (catch Throwable e
-                          (let [e (if (instance? LispReader$ReaderException e)
+                        (catch #?(:clj Throwable :cljr Exception) e
+                          (let [e (if (instance? #?(:clj LispReader$ReaderException :cljr LispReader+ReaderException) e)
                                     (ex-info nil {:clojure.error/phase :read-source} e)
                                     e)]
                             ;; If error happens during read phase, call
@@ -123,7 +124,8 @@
                               (eval-fn input)
                               ;; If eval-fn is not provided, call
                               ;; Compiler/eval directly for slimmer stack.
-                              (Compiler/eval input true))]
+                              #?(:clj (Compiler/eval input true)
+                                 :cljr (Compiler/eval input)))]
                   (set! *3 *2)
                   (set! *2 *1)
                   (set! *1 value)
@@ -134,9 +136,9 @@
                     (t/respond-to msg {:ns (str (ns-name *ns*))
                                        :value value
                                        ::print/keys #{:value}})
-                    (catch Throwable e
+                    (catch #?(:clj Throwable :cljr Exception) e
                       (throw (ex-info nil {:clojure.error/phase :print-eval-result} e)))))
-                (catch Throwable e
+                (catch #?(:clj Throwable :cljr Exception) e
                   (caught e)))
               ;; Otherwise, when errors happen during eval/print phase,
               ;; report the exception but continue executing the
@@ -144,7 +146,7 @@
               (when-not (and stop-on-error? @errored?)
                 (recur)))))
 
-        (catch Throwable e
+        (catch #?(:clj Throwable :cljr Exception) e
           (caught e))
         (finally
           ;; The evaluated code may have closed *out* or *in* (e.g. `(slurp

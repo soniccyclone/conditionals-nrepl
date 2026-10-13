@@ -10,9 +10,10 @@
    [nrepl.misc :as misc :refer [uuid response-for log]]
    [nrepl.transport :as t]
    [nrepl.util.io :as io]
+   #?(:cljr [nrepl.util.runtime :as runtime])
    [nrepl.util.threading :as threading])
-  (:import
-   (clojure.lang Compiler)))
+  #?(:clj (:import
+           (clojure.lang Compiler))))
 
 (def ^:private sessions (atom {}))
 
@@ -83,7 +84,8 @@
           #'*print-namespace-maps*   true
           #'*data-readers*           *data-readers*
           #'*default-data-reader-fn* *default-data-reader-fn*
-          #'*compile-path*           (System/getProperty "clojure.compile.path" "classes")
+          #'*compile-path*           #?(:clj (System/getProperty "clojure.compile.path" "classes")
+                                        :cljr (or (runtime/getenv "CLOJURE_COMPILE_PATH") "."))
           #'*command-line-args*      *command-line-args*
           #'*unchecked-math*         *unchecked-math*
           #'*assert*                 *assert*
@@ -121,10 +123,10 @@
         opts {::print/buffer-size (or out-limit (get (meta session) :out-limit))}
         out (print/replying-PrintWriter :out msg opts)
         err (print/replying-PrintWriter :err msg opts)
-        ctxcl (.getContextClassLoader (Thread/currentThread))]
+        #?@(:clj [ctxcl (.getContextClassLoader (Thread/currentThread))])]
     (-> bindings-map
         (assoc #'*msg* msg
-               Compiler/LOADER ctxcl
+               #?@(:clj [Compiler/LOADER ctxcl])
                #'*out* out
                #'*err* err
                ;; clojure.test captures *out* at load-time, so we need to make
@@ -145,12 +147,14 @@
   - thunk, a Runnable, the task itself
   - ack, another Runnable, ran to notify of successful execution of thunk"
   [session msg]
-  (fn [_id ^Runnable thunk ^Runnable ack & [explicit-msg]]
+  (fn [_id #?(:clj ^Runnable thunk :cljr thunk) #?(:clj ^Runnable ack :cljr ack) & [explicit-msg]]
     (let [f #(let [bindings (add-per-message-bindings (or explicit-msg msg)
                                                       @session)]
                (push-thread-bindings bindings)
-               (try (.run thunk)
-                    (some-> ack .run)
+               (try #?(:clj (.run thunk)
+                       :cljr (thunk))
+                    #?(:clj (some-> ack .run)
+                       :cljr (when ack (ack)))
                     (finally (pop-thread-bindings))))]
       (threading/submit! @ephemeral-executor f))))
 
@@ -193,7 +197,7 @@
         #(try
            (loop []
              (let [{:keys [queue thread]} @state
-                   [exec-id r ^Runnable ack msg] (threading/take! queue)
+                   [exec-id r #?(:clj ^Runnable ack :cljr ack) msg] (threading/take! queue)
                    exec-id (or exec-id (uuid)) ;; :id may be absent in msg.
                    bindings (add-per-message-bindings msg @session)]
                (swap! state assoc :running exec-id)
@@ -201,12 +205,12 @@
                (threading/run-interruptible thread
                                             (if (fn? r)
                                               (r) ;; -1 stack frame this way.
-                                              (.run ^Runnable r)))
+                                              #?(:clj (.run ^Runnable r))))
                (swap! session (fn [current]
                                 (-> (merge current (get-thread-bindings))
                                     ;; Remove vars that we don't want to save
                                     ;; into the session.
-                                    (dissoc #'*msg* Compiler/LOADER))))
+                                    (dissoc #'*msg* #?@(:clj [Compiler/LOADER])))))
                ;; We don't use try/finally here because if the eval throws an
                ;; exception, we're going to discard the whole thread. This makes
                ;; the stack cleaner.
@@ -215,9 +219,10 @@
                  (when (and (= (:running state-d) exec-id)
                             (compare-and-set! state state-d
                                               (assoc state-d :running nil)))
-                   (some-> ack .run)
+                   #?(:clj (some-> ack .run)
+                      :cljr (when ack (ack)))
                    (recur)))))
-           (catch InterruptedException _e)
+           (catch #?(:clj InterruptedException :cljr System.Threading.ThreadInterruptedException) _e)
            (catch Exception _e
              ;; This should never happen with valid middleware and clients. If
              ;; it does, at least make sure the session remains healthy.
