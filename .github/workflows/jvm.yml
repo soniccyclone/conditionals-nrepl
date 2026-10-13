@@ -36,7 +36,6 @@ jobs:
           - {os: windows-latest, clojure: '1.12', jdk: '21', aliases: ''}
     env:
       CLOJURE_VERSION: ${{ matrix.clojure }}
-      TEST_LOG: ${{ runner.temp }}/jvm-test.log
     steps:
     - uses: actions/checkout@v7
 
@@ -78,6 +77,8 @@ jobs:
         done
 
     - name: Run the tests
+      env:
+        TEST_LOG: ${{ runner.temp }}/jvm-test.log
       run: |
         java -version
         clojure -T:build javac :with-tests true
@@ -85,6 +86,8 @@ jobs:
 
     - name: Summarize the results
       if: always()
+      env:
+        TEST_LOG: ${{ runner.temp }}/jvm-test.log
       run: |
         {
           echo "### ${{ matrix.os }}, Clojure ${{ matrix.clojure }}, Temurin ${{ matrix.jdk }}"
