@@ -8,4 +8,6 @@
                   :exec-fn nrepl.clr-test-runner/run
                   :exec-args {:dirs ["test/clojure"]
                               :nses [nrepl.test-helpers.match-test
-                                       nrepl.csharp-helpers-test]}}}}
+                                     nrepl.csharp-helpers-test
+                                     nrepl.util.io-test
+                                     nrepl.bencode-test]}}}}
