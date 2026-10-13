@@ -89,11 +89,13 @@
            cmd  (concat [java]
                         (map (fn [[k v]] (str "-D" k "=" v)) props)
                         ["-cp" (System/getProperty "java.class.path")
-                         "clojure.main" "-e" code])
+                         "clojure.main" "-"])
            proc (-> (ProcessBuilder. ^java.util.List (vec cmd))
                     (.redirectErrorStream true)
                     (.start))
            out  (future (slurp (.getInputStream proc)))]
+       (with-open [in (.getOutputStream proc)]
+         (.write in (.getBytes ^String code "UTF-8")))
        (if (.waitFor proc timeout-ms TimeUnit/MILLISECONDS)
          {:exit (.exitValue proc), :out @out}
          (do (.destroyForcibly proc)

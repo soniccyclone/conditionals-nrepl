@@ -2,6 +2,7 @@
   (:require
    [clojure.test :refer :all]
    [nrepl.core :as nrepl]
+   [nrepl.test-helpers.bounded :as bounded]
    [nrepl.transport :as t])
   #?(:clj (:import (java.util.concurrent CountDownLatch))
      :cljr (:import (System.Runtime.CompilerServices RuntimeHelpers)
@@ -52,3 +53,19 @@
                                         calls))))]
     (dotimes [_ 1000]
       (is (= 1 (distinct-heads (nrepl/client local 1000)))))))
+
+(deftest client-send-returns-a-seq-that-includes-the-reply-under-a-concurrent-reader
+  (let [[local remote] (t/piped-transports)
+        seen (promise)
+        transport (reify t/Transport
+                    (recv [_ timeout] (t/recv local timeout))
+                    (recv [_] (t/recv local))
+                    (send [this msg]
+                      (t/send remote {:id (:id msg)})
+                      (deref seen bounded/wait-ms nil)
+                      this))
+        c (nrepl/client transport 1000)
+        reader (bounded/spawn #(doseq [_ (c)] (deliver seen true)))
+        reply (bounded/bounded #(first (c {:id "x"})))]
+    (is (= {:id "x"} reply))
+    (bounded/await-result reader)))

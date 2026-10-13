@@ -43,8 +43,9 @@
       ;; transport would each see only some of the responses.
       ([] (or @latest-head (swap! latest-head #(or % (resp-seq)))))
       ([msg]
-       (transport/send transport msg)
-       (this)))))
+       (let [head (this)]
+         (transport/send transport msg)
+         head)))))
 
 (defn- delimited-transport-seq
   "Returns a function of one argument that performs described below.

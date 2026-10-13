@@ -3,7 +3,7 @@
 </p>
 
 ----------
-[![CircleCI](https://img.shields.io/circleci/build/github/nrepl/nrepl/master.svg)](https://circleci.com/gh/nrepl/nrepl/tree/master)
+[![JVM tests](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/jvm.yml/badge.svg)](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/jvm.yml)
 [![Spell-check Status](https://github.com/nrepl/nrepl/actions/workflows/spell_checking.yml/badge.svg)](https://github.com/nrepl/nrepl/actions/workflows/spell_checking.yml)
 [![Clojars Project](https://img.shields.io/clojars/v/nrepl.svg)](https://clojars.org/nrepl/nrepl)
 [![cljdoc badge](https://cljdoc.org/badge/nrepl/nrepl)](https://cljdoc.org/d/nrepl/nrepl/CURRENT)
