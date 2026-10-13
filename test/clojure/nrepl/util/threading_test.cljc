@@ -46,7 +46,7 @@
 
 (defn- spin
   []
-  #?(:clj (Thread/onSpinWait)
+  #?(:clj (Thread/yield)
      :cljr (System.Threading.Thread/SpinWait 1)))
 
 (defn- shutdown!
