@@ -1,7 +1,6 @@
 name: Spell Checking
 
-on:
-  workflow_dispatch:
+on: [pull_request]
 
 jobs:
   codespell:
