@@ -603,8 +603,12 @@
     (is (empty? (clojure.set/intersection ids ids2)))
     (is (= (th/newline->sys ":foo\n") out1 out2))))
 
+(def ^:private read-timeout-eval-ms
+  #?(:clj 1100
+     :cljr 1250))
+
 (def-repl-test read-timeout
-  (is (nil? (repl-values timeout-session (str "(" sleep-fn " 1100) :ok"))))
+  (is (nil? (repl-values timeout-session (str "(" sleep-fn " " read-timeout-eval-ms ") :ok"))))
   ;; just getting the values off of the wire so the server side doesn't
   ;; toss a spurious stack trace when the client disconnects
   (is (= [nil :ok] (->> (repeatedly #(transport/recv transport 500))
