@@ -116,6 +116,7 @@
             (.exitValue ^Process proc))
      :cljr (let [^Process p (:process proc)]
              (when (.WaitForExit p (int ms))
+               (.WaitForExit p)
                (.ExitCode p)))))
 
 (def ^:private exit-42-code

@@ -18,6 +18,8 @@ jobs:
           - {os: windows-latest, dotnet: '8.0', role: target, informational: false}
           - {os: ubuntu-latest, dotnet: '10.0', role: informational, informational: true}
           - {os: windows-latest, dotnet: '10.0', role: informational, informational: true}
+          - {os: macos-latest, dotnet: '8.0', role: target, informational: false}
+          - {os: macos-latest, dotnet: '10.0', role: informational, informational: true}
     steps:
     - uses: actions/checkout@v7
 
@@ -68,4 +70,121 @@ jobs:
       run: cljr -P -X:test
 
     - name: Run the tests
-      run: cljr -X:test
+      id: test
+      timeout-minutes: 20
+      shell: bash
+      run: cljr -X:test 2>&1 | tee "$RUNNER_TEMP/clr-test.log"
+
+    - name: Summarise the environment and test counts
+      if: always()
+      shell: bash
+      env:
+        TEST_OUTCOME: ${{ steps.test.outcome }}
+        MATRIX_ROLE: ${{ matrix.role }}
+        MATRIX_DOTNET: ${{ matrix.dotnet }}
+      run: |
+        log="$RUNNER_TEMP/clr-test.log"
+        script="$RUNNER_TEMP/clr-summary.clj"
+        cat > "$script" <<'CLJ'
+        (import '(System.Runtime.InteropServices RuntimeInformation OSPlatform)
+                '(System.Net.Sockets Socket)
+                '(System.IO Path Directory)
+                '(System.Globalization CultureInfo)
+                '(System.Reflection BindingFlags))
+
+        (defn kv [k v] (println (str k "=" v)))
+
+        (defn nbytes [^String s] (.GetByteCount System.Text.Encoding/UTF8 s))
+
+        (defn cwd-after-chdir [dir]
+          (let [previous Environment/CurrentDirectory]
+            (try
+              (set! Environment/CurrentDirectory dir)
+              Environment/CurrentDirectory
+              (finally
+                (set! Environment/CurrentDirectory previous)))))
+
+        (defn socket-path [[prefix name relative?]]
+          (let [dir (Path/Combine (Path/GetTempPath) (str prefix "12345678"))]
+            (Directory/CreateDirectory dir)
+            (try
+              (str (if relative? (cwd-after-chdir dir) dir) Path/DirectorySeparatorChar name)
+              (finally
+                (Directory/Delete dir)))))
+
+        (def socket-shapes
+          [["nrepl-uri-" "a&b=c+d$e,f" false]
+           ["nrepl-sock-" "listener" false]
+           ["nrepl-sock-" "relative.sock" true]
+           ["socket-test-" "socket" false]
+           ["edn-sock-" "socket" false]])
+
+        (def tr (try (CultureInfo/GetCultureInfo "tr-TR") (catch Exception _ nil)))
+        (def tr-upper-i (when tr (.ToUpper "i" tr)))
+        (def invariant-flag
+          (some-> (.GetType (.Assembly (type System.Object)) "System.Globalization.GlobalizationMode")
+                  (.GetProperty "Invariant" (enum-or BindingFlags/Static BindingFlags/NonPublic BindingFlags/Public))
+                  (.GetValue nil nil)))
+        (def longest (apply max-key nbytes (map socket-path socket-shapes)))
+
+        (kv "framework" (RuntimeInformation/FrameworkDescription))
+        (kv "os" (RuntimeInformation/OSDescription))
+        (kv "process_arch" (RuntimeInformation/ProcessArchitecture))
+        (kv "invariant_env" (or (Environment/GetEnvironmentVariable "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT") "unset"))
+        (kv "invariant_flag" (if (nil? invariant-flag) "unreadable" invariant-flag))
+        (kv "tr_upper_i" (or tr-upper-i "tr-TR unavailable"))
+        (kv "runs_invariant" (not= "İ" tr-upper-i))
+        (kv "culture" (let [n (.Name CultureInfo/CurrentCulture)] (if (= "" n) "(invariant culture)" n)))
+        (kv "unix_sockets" Socket/OSSupportsUnixDomainSockets)
+        (kv "temp_dir" (Path/GetTempPath))
+        (kv "socket_limit" (if (RuntimeInformation/IsOSPlatform OSPlatform/OSX) 104 108))
+        (kv "socket_bytes" (nbytes longest))
+        (kv "socket_path" longest)
+        CLJ
+        status=0
+        facts=""
+        if ! facts="$(Clojure.Main "$script" | tr -d '\r')"; then
+          echo "the environment probe failed"
+          if [ "$TEST_OUTCOME" != skipped ]; then status=1; fi
+        fi
+        fact() { printf '%s\n' "$facts" | sed -n "s/^$1=//p" | head -n 1; }
+        count_line=""
+        result_line=""
+        if [ "$TEST_OUTCOME" = skipped ]; then
+          count_line="the test step did not run"
+        elif [ -f "$log" ]; then
+          count_line="$(grep -E '^Ran [0-9]+ tests containing [0-9]+ assertions\.' "$log" | tail -n 1 | tr -d '\r' || true)"
+          result_line="$(grep -E '^[0-9]+ failures, [0-9]+ errors\.' "$log" | tail -n 1 | tr -d '\r' || true)"
+        fi
+        if [ "$TEST_OUTCOME" != skipped ] && { [ -z "$count_line" ] || [ -z "$result_line" ]; }; then
+          count_line="NO COUNT LINE in the test log"
+          status=1
+        fi
+        socket_bytes="$(fact socket_bytes)"
+        socket_limit="$(fact socket_limit)"
+        if [ "$(fact unix_sockets)" != True ]; then
+          socket_text="unix-socket tests are gated off (Socket.OSSupportsUnixDomainSockets is $(fact unix_sockets))"
+        elif [ -n "$socket_bytes" ] && [ "$socket_bytes" -lt "$socket_limit" ]; then
+          socket_text="longest socket path $socket_bytes bytes, limit $socket_limit, fits: $(fact socket_path)"
+        else
+          socket_text="longest socket path $socket_bytes bytes, limit $socket_limit, TOO LONG: $(fact socket_path)"
+        fi
+        {
+          echo "### ClojureCLR on $RUNNER_OS ($RUNNER_ARCH), $MATRIX_ROLE .NET $MATRIX_DOTNET"
+          echo
+          echo "| Item | Value |"
+          echo "| --- | --- |"
+          echo "| OS | $RUNNER_OS, $(fact os) |"
+          echo "| Runner arch | $RUNNER_ARCH (.NET process $(fact process_arch)) |"
+          echo "| .NET role and version | $MATRIX_ROLE, $MATRIX_DOTNET |"
+          echo "| ClojureCLR runs on | $(fact framework) |"
+          echo "| DOTNET_SYSTEM_GLOBALIZATION_INVARIANT | $(fact invariant_env) |"
+          echo "| .NET runs invariant | $(fact runs_invariant) (GlobalizationMode.Invariant: $(fact invariant_flag); upper-case of i in tr-TR: $(fact tr_upper_i)) |"
+          echo "| Current culture | $(fact culture) |"
+          echo "| Temp dir | $(fact temp_dir) |"
+          echo "| Unix sockets | $socket_text |"
+          echo "| Test step | $TEST_OUTCOME |"
+          echo "| Count | $count_line |"
+          echo "| Result | $result_line |"
+        } | tee -a "$GITHUB_STEP_SUMMARY"
+        exit "$status"

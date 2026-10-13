@@ -7,8 +7,8 @@
             [nrepl.util.io :as io])
   (:import (System.IO EndOfStreamException IOException Stream)
            (System.Net IPAddress)
-           (System.Net.Sockets LingerOption NetworkStream Socket SocketError
-                               SocketException TcpListener)
+           (System.Net.Sockets AddressFamily LingerOption NetworkStream ProtocolType Socket
+                               SocketError SocketException SocketType TcpListener)
            (System.Threading Thread)))
 
 (defn- socket-exception [code]
@@ -362,6 +362,15 @@
             (let [e (await-caught blocked)]
               (is (sut/closed-exception? e))
               (is (sut/listener-closed? ss)))))))
+
+    (testing "accept on an open listener that cannot accept propagates the genuine error"
+      (let [unbound (nrepl.socket.UnixServer. (Socket. AddressFamily/Unix SocketType/Stream ProtocolType/Unspecified)
+                                              "unbound"
+                                              (atom false))
+            e (caught #(sut/accept unbound))]
+        (is (some? e))
+        (is (not (sut/closed-exception? e)))
+        (is (not (sut/listener-closed? unbound)))))
 
     (testing "a connection accepted before the listener closed keeps working, in both directions"
       (with-temp-dir

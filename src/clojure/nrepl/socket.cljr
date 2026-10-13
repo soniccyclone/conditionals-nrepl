@@ -8,7 +8,8 @@
    (System.IO EndOfStreamException IOException Path Stream)
    (System.Net Dns IPAddress IPEndPoint)
    (System.Net.Sockets AddressFamily NetworkStream ProtocolType Socket SocketError
-                       SocketException SocketType TcpListener UnixDomainSocketEndPoint)
+                       SocketException SocketShutdown SocketTaskExtensions SocketType
+                       TcpListener UnixDomainSocketEndPoint)
    (System.Text Encoding StringBuilder)
    (System.Text.RegularExpressions Match Regex)))
 
@@ -129,11 +130,28 @@
   []
   (throw (ObjectDisposedException. "The nREPL listener is closed")))
 
+(def ^:private accept-task-type
+  (symbol "System.Threading.Tasks.Task`1[System.Net.Sockets.Socket]"))
+
+(defmacro ^:private with-accept-task
+  [[sym expr] & body]
+  `(let [~(with-meta sym {:tag accept-task-type}) ~expr]
+     ~@body))
+
+(defn- accept-unix
+  ^Socket [^Socket listener]
+  (with-accept-task [task (SocketTaskExtensions/AcceptAsync listener)]
+    (try
+      (.Wait task)
+      (.Result task)
+      (catch AggregateException e
+        (throw (or (.InnerException e) e))))))
+
 (defn accept
   [s]
   (try
     (if (instance? UnixServer s)
-      (.Accept ^Socket (.listener ^UnixServer s))
+      (accept-unix (.listener ^UnixServer s))
       (.AcceptSocket ^TcpListener (.listener ^TcpServer s)))
     (catch Exception e
       (if (listener-closed? s)
@@ -318,8 +336,13 @@
         (throw e)))))
 
 (defn close-connection!
-  [s]
-  (.Dispose ^Socket s))
+  [^Socket s]
+  (when (= AddressFamily/Unix (.AddressFamily s))
+    (try
+      (.Shutdown s SocketShutdown/Both)
+      (catch SocketException _)
+      (catch ObjectDisposedException _)))
+  (.Dispose s))
 
 (def ^:private weak-table-type
   (symbol "System.Runtime.CompilerServices.ConditionalWeakTable`2[System.Net.Sockets.Socket,System.Net.Sockets.NetworkStream]"))

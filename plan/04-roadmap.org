@@ -16,7 +16,7 @@ clojure -M:1.12:dev -i plan/verify/threadnames.clj   # thread-name multiset befo
 # CLR, phase 2 onward (container nrepl-clr)
 cljr -X:test                       # ~18 s per invocation on net8; a test ns that fails to load aborts the whole run
 #+end_src
-CI facts: CircleCI runs Clojure 1.12 on JDK 17/21/25/26, 1.12 + junixsocket on JDK 8/11, 1.13 on 17/21/25/26, 1.10 and 1.11 on 8/26, Windows on 21. Every =.cljc= must load on Clojure 1.10 unless the fork raises its minimum.
+CI facts: GitHub Actions runs everything. =.github/workflows/jvm.yml= runs the kaocha suite on Linux with Clojure 1.12 on Temurin 17/21/25/26, 1.12 + junixsocket on Temurin 8/11, 1.13 on 17/21/25/26, 1.10 and 1.11 on 8/26 and 1.10 on 21, and Clojure 1.10 and 1.12 on Temurin 21 on both Windows and macOS, plus a lint job (clj-kondo, cljfmt, Eastwood, =make kondo-clr=, Cljdoc, ops docs) on Linux. =.github/workflows/clr.yml= runs the ClojureCLR suite on Linux, Windows and macOS, .NET 8 required and .NET 10 informational. Every =.cljc= must load on Clojure 1.10 unless the fork raises its minimum.
 
 * Phase 0. Fork hygiene (0.5 d)
 - DONE Baseline recorded on 2026-10-11 in a JDK 21 container: 178 tests, 0 failures; lint clean (=plan/verify/Containerfile.jvm=, =-e CLOJURE_VERSION=1.12= or the image's =ENV=).
@@ -169,6 +169,12 @@ Exit criterion for phase 2: the CLR CI job runs every test file except =tls_test
 | tls, tls_client_proxy | run | phase 3 |
 | cmdline | run | the eleven-test subset plus the process-spawning variants |
 | cmdline_tty, jvmti, classloader | run | never |
+
+| Suite | Linux | Windows | macOS |
+|---+---+---+---|
+| JVM kaocha (=jvm.yml=) | Clojure 1.10 to 1.13 on Temurin 8 to 26 (15 legs; =:+junixsocket= on Temurin 8 and 11 and on the 1.10 and 1.11 Temurin 26 legs) | Clojure 1.10 and 1.12 on Temurin 21; 8 fewer tests (the =win?=-gated thread-stop tests in core_test, threading and jvmti); the TLS tests run as no-ops | Clojure 1.10 and 1.12 on Temurin 21 |
+| CLR test-runner (=clr.yml=) | .NET 8 required, .NET 10 informational | .NET 8 required, .NET 10 informational; the =win?= gates skip some tests | .NET 8 required, .NET 10 informational |
+| lint (=jvm.yml= lint job) | clj-kondo, cljfmt, Eastwood, =make kondo-clr=, Cljdoc, ops docs on Temurin 26 | not run | not run |
 
 * Effort
 | Phase | Days |
