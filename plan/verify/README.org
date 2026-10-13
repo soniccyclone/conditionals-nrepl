@@ -33,6 +33,33 @@ podman run --rm --security-opt label=disable -v "$PWD":/work -v "$HOME/.m2":/roo
 podman run --rm --security-opt label=disable -v "$PWD":/work -v "$HOME/.m2":/root/.m2 -w /work nrepl-jvm make lint
 #+end_src
 
+* Running the CI matrix locally
+=make ci-local= (from the repo root) runs every ubuntu leg of =.github/workflows/jvm.yml= and =clr.yml= in parallel in podman and prints one row per leg. Requirements: =podman= (rootless is fine), bash 4 or newer, =flock=, network access for the first run, and a Linux host. Nothing else is installed on the host.
+
+#+begin_src sh
+make ci-local                                    # all legs
+make ci-local LEG=1.12-temurin-8                 # one leg
+make ci-local LOOP=50 TEST=nrepl.socket-test     # loop a namespace in one JVM
+#+end_src
+
+| Variable | Meaning |
+|---+---|
+| =LEG= | one leg name: =<clojure>-temurin-<jdk>=, =lint=, =clr-net8= or =clr-net10= |
+| =LOOP=, =TEST= | run test namespace =TEST= =LOOP= times inside one JVM through kaocha; defaults to leg =1.12-temurin-21= (a JDK with native unix sockets); JVM legs only; exits 1 if any run failed |
+| =JOBS= | maximum legs running at once (default 8; see below) |
+| =LEG_CPUS= | CPUs each leg's container may use (default 2, the size of a small hosted runner, so 17 JVMs do not oversubscribe the cores); 0 removes the limit |
+| =LEG_TIMEOUT= | seconds before a leg's container is killed (default 600; =600 + LOOP= in loop mode) |
+| =M2_DIR=, =GITLIBS_DIR= | shared dependency caches, default =~/.m2= and =~/.gitlibs= |
+
+How it works:
+- [[file:ci_matrix.clj][ci_matrix.clj]] runs in a throwaway =clojure:temurin-21-noble= container with =clj-yaml= and turns the two workflow files into =target/ci-local/legs.tsv= plus one script per workflow step, with the =${{ }}= expressions substituted. An expression or step it does not know aborts the run.
+- Images: =nrepl-ci-jvm-<jdk>-<cli>= from [[file:Containerfile.jvm][Containerfile.jvm]] (the CLI is pinned to the version =jvm.yml= pins), =nrepl-clr= (built only if absent) and =nrepl-ci-clr-10.0= from [[file:Containerfile.clr][Containerfile.clr]].
+- Each distinct dependency-prepare script runs once, serially, before the legs start, so concurrent legs never download into =~/.m2= at the same time.
+- Each leg mounts the checkout as a private overlay (=-v $PWD:/work:O=): writes (=target/=, classes, =bin/=, =obj/=, regenerated docs) never reach the host and never reach another leg. =.cpcache= and =~/.m2= are shared; =test-results/= is a per-leg directory under =target/ci-local/<leg>/=. When the checkout is a git worktree, the common git directory is mounted at its host path so =make verify-docs= works.
+- Why =JOBS= is 8, not all 18: on a 32-core host shared with other work, all legs at once finished in 5.3 to 5.7 minutes but each of four runs had 5 JDK 17+ legs fail on =nrepl.bencode-test/data-that-arrives-in-pieces-is-reassembled= (it asserts an unfinished read immediately after the last write) or =nrepl.socket-test/unix-socket-server-test=. With =JOBS=8= one run of 18 legs took 6.0 minutes and every JVM leg passed. Longest legs (CLR) start first.
+- Containers are named =nrepl-ci-local-<pid>-<leg>= and run with =--rm=; the script only ever stops containers with its own prefix.
+- Per-leg logs: =target/ci-local/<leg>.log=. =clr-net10= is informational, as on CI: it is listed but never fails the run.
+
 * Files
 | File | Purpose |
 |---+---|
