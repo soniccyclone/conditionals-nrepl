@@ -6,6 +6,22 @@
 
 ## master (unreleased)
 
+### New features
+
+- `:force-interrupt` config key (default true): set it to false to stop `interrupt` from force-stopping an eval thread that ignores the interrupt.
+- `describe` reports the host under `:aux {:host {:name "jvm" :can-stop-threads "true"|"false"}}`; `:can-stop-threads` tells a client whether `interrupt` can force-stop a runaway eval. The flag is a string because bencode cannot carry booleans.
+- `nrepl.util.out/unwrap-standard-streams` undoes `wrap-standard-streams`: it restores the original `System/out`, `System/err` and root `*out*` / `*err*`, and keeps registered callbacks for a later re-wrap.
+
+### Changes
+
+- **(Breaking)** Removed `nrepl.util.threading/thread-reaper-executor`; the forced-stop reaper is now private to the threading implementation.
+- Per-connection loops now run on `nREPL-connection-N` threads, and the stdout/stderr callbacks of `wrap-standard-streams` now run on `nREPL-handler-N` threads instead of `nREPL-transport-N`.
+
+### Bugs fixed
+
+- Non-ASCII `:out` chunks were mangled on JVMs with a non-UTF-8 default charset.
+- A bencode message cut short inside a netstring ("Less data available than expected") now reports a lost connection instead of a raw `EOFException`.
+
 ## 1.8.0 (2026-10-02)
 
 ### New features

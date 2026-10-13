@@ -1,4 +1,49 @@
 {:cljc {:features [:cljs]}
- :linters {:unresolved-namespace {:exclude [Environment System.Environment
+ :linters {:unresolved-var {:exclude [cljs.core/*file* cljs.core/*source-path*
+                                      cljs.core/pr-on cljs.core/read]}
+           :unresolved-namespace {:exclude [Environment System.Environment
                                             System.IO.Path System.IO.File
-                                            System.Threading.Thread]}}}
+                                            System.Threading.Thread
+                                            System.Array]}
+           :unresolved-symbol {:exclude [System byte-array format class String
+                                         alter-var-root *err*
+                                         promise future deliver Exception with-open read-string
+                                         requiring-resolve InvalidOperationException
+                                         ArgumentException]}}
+ :config-in-ns {nrepl.ack {:linters {:invalid-arity {:level :off}
+                                    :unresolved-symbol {:exclude [transport]}}}
+                nrepl.bencode {:linters {:unresolved-symbol {:exclude [definline read-byte input buf
+                                                                        off len b output s]}}}
+                nrepl.cmdline.options {:linters {:unresolved-symbol {:exclude [spit]}
+                                                 :unused-binding {:level :off}}}
+                nrepl.middleware {:linters {:unresolved-symbol {:exclude [*clojure-version* clojure-version]}}}
+                nrepl.middleware.load-file {:linters {:unresolved-symbol {:exclude [*read-eval* *unchecked-math*
+                                                                                    *warn-on-reflection* *data-readers*]}}}
+                nrepl.middleware.interruptible-eval {:linters {:unused-import {:level :off}
+                                                               :unresolved-namespace {:exclude [Compiler]}
+                                                               :unresolved-symbol {:exclude [*in* Object find-var
+                                                                                             pop-thread-bindings
+                                                                                             push-thread-bindings]}}}
+                nrepl.middleware.print {:linters {:redefined-var {:level :off}}}
+                nrepl.middleware.session {:linters {:missing-else-branch {:level :off}
+                                                    :unresolved-symbol {:exclude [*1 *2 *3 *assert* *command-line-args*
+                                                                                  *compile-path* *data-readers*
+                                                                                  *default-data-reader-fn* *e *file*
+                                                                                  *in* *math-context* *print-length*
+                                                                                  *print-level* *print-meta*
+                                                                                  *print-namespace-maps* *read-eval*
+                                                                                  *unchecked-math* *warn-on-reflection*
+                                                                                  clojure get-thread-bindings
+                                                                                  pop-thread-bindings
+                                                                                  push-thread-bindings]}}}
+                nrepl.misc {:linters {:redefined-var {:level :off}
+                                      :unresolved-namespace {:exclude [Int32 System.Guid]}
+                                      :unresolved-symbol {:exclude [clojure]}}}
+                nrepl.util.completion {:linters {:unresolved-namespace {:exclude [Char StringComparison]}
+                                                 :unresolved-symbol {:exclude [*clojure-version* *unchecked-math*
+                                                                               Object all-ns class? clojure
+                                                                               ns-aliases ns-map]}}}
+                nrepl.transport {:linters {:unresolved-symbol {:exclude [clojure printf]}}}
+                nrepl.util.io {:linters {:redefined-var {:level :off}}}
+                nrepl.util.lookup {:linters {:unresolved-symbol {:exclude [ns-resolve]}}}
+                nrepl.util.print {:linters {:unresolved-symbol {:exclude [print-dup print-method with-bindings]}}}}}

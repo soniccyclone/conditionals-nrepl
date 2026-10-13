@@ -50,6 +50,12 @@
   (let [e (noisy-deref exception-promise)]
     (instance? SSLException e)))
 
+(deftest handshake-exception-test
+  (is (tls/handshake-exception? (SSLException. "bad")))
+  (is (tls/handshake-exception? (SSLHandshakeException. "bad")))
+  (is (not (tls/handshake-exception? (java.io.IOException. "bad"))))
+  (is (not (tls/handshake-exception? nil))))
+
 (deftest bad-config
   (is (thrown? ExceptionInfo (server/start-server :tls? true)))
   (is (= :nrepl.server/invalid-start-request
@@ -76,7 +82,7 @@
     (is (some? e))
     (when e
       (doseq [substr substrs]
-        (is (str/includes? (.getMessage e) substr))))))
+        (is (str/includes? (ex-message e) substr))))))
 
 (deftest descriptive-key-material-errors
   (let [{:keys [ca-cert server-cert server-key]} (locksmith/gen-certs {:duration-days 1})]
@@ -112,7 +118,7 @@
         (is (some? (tls/ssl-context-or-throw (str ca-cert server-cert "\n" indented-key "\n") nil)))))
     (testing "the underlying cause is preserved"
       (let [e (ctx-error (str ca-cert server-cert))]
-        (is (some? (.getCause e)))))))
+        (is (some? (ex-cause e)))))))
 
 (deftest ed25519-private-key-parsing
   (if-let [^java.security.KeyPairGenerator kpg (try

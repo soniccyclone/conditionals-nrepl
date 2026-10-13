@@ -10,13 +10,9 @@
   "A netstring and bencode implementation for Clojure."
   {:author "Meikel Brandmeyer"}
   (:require
-   [clojure.java.io :as io])
+   [nrepl.util.io :as io])
   (:import
-   (clojure.lang IPersistentCollection IPersistentMap Named PersistentVector)
-   (java.io ByteArrayOutputStream EOFException InputStream IOException
-            OutputStream PushbackInputStream)
-   (java.nio.charset StandardCharsets)
-   (java.util Arrays)))
+   (clojure.lang IPersistentCollection IPersistentMap Named PersistentVector)))
 
 ;; # Motivation
 ;;
@@ -80,7 +76,8 @@
 (def ^:const colon 58)
 
 (defn- throw-eof []
-  (throw (EOFException. "Invalid netstring. Unexpected end of input.")))
+  (throw (new #?(:clj java.io.EOFException :cljr System.IO.EndOfStreamException)
+              "Invalid netstring. Unexpected end of input.")))
 
 ;; This function is inline because it is used in a hot loop inside `read-long`.
 
@@ -91,20 +88,52 @@
   ;; is an `int` that has a range 0-255. Everything below the value 128 stands
   ;; for itself. But larger values are actually negative byte values. We have to
   ;; translate it back here. Narrowing downcast to byte does precisely that.
-  `(let [c# (.read ~(with-meta input {:tag 'InputStream}))]
+  `(let [c# (#?(:clj .read :cljr .ReadByte)
+             ~(with-meta input {:tag #?(:clj 'java.io.InputStream :cljr 'System.IO.Stream)}))]
      (when (neg? c#) (throw-eof))
      ;; Cast back to int to avoid boxing and/or redundant casts for consumers.
      (unchecked-int (unchecked-byte c#))))
 
-(defn- read-bytes ^bytes [^InputStream input, ^long n]
+(definline ^:private read-fully! [input buf off len]
+  `(#?(:clj .read :cljr .Read)
+    ~(with-meta input {:tag #?(:clj 'java.io.InputStream :cljr 'System.IO.Stream)})
+    ~(with-meta buf {:tag 'bytes}) ~off ~len))
+
+(definline ^:private unread-byte! [input b]
+  `(#?(:clj .unread :cljr .Unread)
+    ~(with-meta input {:tag #?(:clj 'java.io.PushbackInputStream :cljr 'clojure.lang.PushbackInputStream)})
+    (unchecked-int ~b)))
+
+(definline ^:private write-byte! [output b]
+  `(#?(:clj .write :cljr .WriteByte)
+    ~(with-meta output {:tag #?(:clj 'java.io.OutputStream :cljr 'System.IO.Stream)})
+    (unchecked-int ~b)))
+
+(definline ^:private write-bytes! [output buf]
+  #?(:clj `(.write ~(with-meta output {:tag 'java.io.OutputStream})
+                   ~(with-meta buf {:tag 'bytes}))
+     :cljr `(let [buf# ~(with-meta buf {:tag 'bytes})]
+              (.Write ~(with-meta output {:tag 'System.IO.Stream})
+                      buf# 0 (alength buf#)))))
+
+(definline ^:private utf8-bytes [s]
+  #?(:clj `(.getBytes ~(with-meta s {:tag 'String}) java.nio.charset.StandardCharsets/UTF_8)
+     :cljr `(.GetBytes System.Text.Encoding/UTF8 ~(with-meta s {:tag 'String}))))
+
+(definline ^:private utf8-string [b]
+  #?(:clj `(String. ~(with-meta b {:tag 'bytes}) java.nio.charset.StandardCharsets/UTF_8)
+     :cljr `(.GetString System.Text.Encoding/UTF8 ~(with-meta b {:tag 'bytes}))))
+
+(defn- read-bytes ^bytes [^#?(:clj java.io.InputStream :cljr System.IO.Stream) input, ^long n]
   (let [content (byte-array n)]
     (loop [offset 0, len n]
-      (let [result (.read input content (unchecked-int offset)
-                          (unchecked-int len))]
-        (when (neg? result)
+      (let [result (read-fully! input content (unchecked-int offset)
+                                (unchecked-int len))]
+        (when #?(:clj (neg? result)
+                 :cljr (and (zero? result) (pos? len)))
           (throw
-           (EOFException.
-            "Invalid netstring. Less data available than expected.")))
+           (new #?(:clj java.io.EOFException :cljr System.IO.EndOfStreamException)
+                "Invalid netstring. Less data available than expected.")))
         (when-not (= result len)
           (recur (unchecked-add offset result) (unchecked-subtract len result)))))
     content))
@@ -113,12 +142,12 @@
 ;; as the byte count prefixes of byte strings. The delimiter is \:
 ;; for byte count prefixes and \e for integers.
 
-(defn- read-long ^long [^PushbackInputStream input, ^long delim]
+(defn- read-long ^long [^#?(:clj java.io.PushbackInputStream :cljr clojure.lang.PushbackInputStream) input, ^long delim]
   (let [first-byte (read-byte input)
         ;; Only the first byte can be a minus.
         negate? (if (= first-byte minus)
                   true
-                  (do (.unread input first-byte)
+                  (do (unread-byte! input first-byte)
                       false))]
     (loop [n 0]
       ;; We read repeatedly a byte from the input...
@@ -159,7 +188,8 @@
   ^bytes [input]
   (let [content (read-netstring* input)]
     (when-not (= (read-byte input) comma)
-      (throw (IOException. "Invalid netstring. ',' expected.")))
+      (throw (new #?(:clj java.io.IOException :cljr System.IO.IOException)
+                  "Invalid netstring. ',' expected.")))
     content))
 
 ;; Similarly the `string>payload` and `string<payload` functions
@@ -167,10 +197,10 @@
 ;; and byte arrays in various parts of the code.
 
 (defn- string>payload ^bytes [^String s]
-  (.getBytes s StandardCharsets/UTF_8))
+  (utf8-bytes s))
 
 (defn- string<payload ^String [^bytes b]
-  (String. b StandardCharsets/UTF_8))
+  (utf8-string b))
 
 ;; ## Writing a netstring
 ;;
@@ -183,19 +213,19 @@
 ;; Similar to `read-netstring` we also split `write-netstring` into
 ;; the entry point itself and a helper function.
 
-(defn- write-netstring* [^OutputStream output, ^bytes content]
+(defn- write-netstring* [^#?(:clj java.io.OutputStream :cljr System.IO.Stream) output, ^bytes content]
   (doto output
-    (.write (string>payload (str (alength content))))
-    (.write (unchecked-int colon))
-    (.write content)))
+    (write-bytes! (string>payload (str (alength content))))
+    (write-byte! colon)
+    (write-bytes! content)))
 
 (defn write-netstring
   "Write the given binary data to the output stream in form of a classic
   netstring."
-  [^OutputStream output, content]
+  [^#?(:clj java.io.OutputStream :cljr System.IO.Stream) output, content]
   (doto output
     (write-netstring* content)
-    (.write (unchecked-int comma))))
+    (write-byte! comma)))
 
 ;; # Bencode
 ;;
@@ -250,7 +280,8 @@
     (if-some [key (read-bencode input)]
       (if-some [val (read-bencode input)]
         (recur (assoc! m (string<payload key) val))
-        (throw (EOFException. "Invalid bencode map. Unexpected end of input.")))
+        (throw (new #?(:clj java.io.EOFException :cljr System.IO.EndOfStreamException)
+                    "Invalid bencode map. Unexpected end of input.")))
       (persistent! m))))
 
 ;; Note that we use `nil` to represent the terminator read from the input. It is
@@ -259,19 +290,19 @@
 
 (defn read-bencode
   "Read bencode token from the input stream."
-  [^PushbackInputStream input]
+  [^#?(:clj java.io.PushbackInputStream :cljr clojure.lang.PushbackInputStream) input]
   (let [first-byte (read-byte input)]
     (cond (= first-byte i) (read-integer input)
           (= first-byte l) (read-list input)
           (= first-byte d) (read-map input)
           (= first-byte e) nil
-          :else (do (.unread input first-byte)
+          :else (do (unread-byte! input first-byte)
                     (read-netstring* input)))))
 
 (defn read-nrepl-message
   "Same as `read-bencode`, but ensure that the top-level value is a map as
   expected by the nREPL protocol."
-  [^PushbackInputStream input]
+  [^#?(:clj java.io.PushbackInputStream :cljr clojure.lang.PushbackInputStream) input]
   (let [first-byte (read-byte input)]
     (if (= first-byte d)
       (read-map input)
@@ -299,15 +330,15 @@ Wrong first byte: %s (must be %d)." first-byte d) {})))))
   (write-bencode* thing output))
 
 (defn- throw-illegal-value [obj what]
-  (throw (IllegalArgumentException.
-          (format "Cannot write %s of type %s" what (class obj)))))
+  (throw (new #?(:clj IllegalArgumentException :cljr System.ArgumentException)
+              (format "Cannot write %s of type %s" what (class obj)))))
 
 ;; Lists and maps work recursively to print their elements.
 
-(defn- write-bencode-list [lst, ^OutputStream output]
-  (.write output (unchecked-int l))
+(defn- write-bencode-list [lst, ^#?(:clj java.io.OutputStream :cljr System.IO.Stream) output]
+  (write-byte! output l)
   (run! #(write-bencode output %) lst)
-  (.write output (unchecked-int e)))
+  (write-byte! output e))
 
 ;; However, maps are special because their keys are sorted lexicographically
 ;; based on their byte string representation.
@@ -315,10 +346,10 @@ Wrong first byte: %s (must be %d)." first-byte d) {})))))
 (defn- named>string [named]
   (cond (string? named) named
         (symbol? named) (str named)
-        (keyword? named) (str (.sym ^clojure.lang.Keyword named))
+        (keyword? named) (str (symbol named))
         :else (throw-illegal-value named "map key")))
 
-(defn- write-bencode-map [^IPersistentMap m, ^OutputStream output]
+(defn- write-bencode-map [^clojure.lang.Counted m, ^#?(:clj java.io.OutputStream :cljr System.IO.Stream) output]
   ;; The implementation here is quite unidiomatic for performance reasons. We
   ;; need to transform the keys of a map to strings, then sort the kvs
   ;; lexicographically by key, then write to output. To avoid creating redundant
@@ -332,15 +363,22 @@ Wrong first byte: %s (must be %d)." first-byte d) {})))))
                  (inc i))
                0 m)
 
-    (Arrays/sort arr (fn [^PersistentVector x, ^PersistentVector y]
-                       (compare (.nth x 0) (.nth y 0))))
+    (#?(:clj java.util.Arrays/sort :cljr System.Array/Sort)
+     arr (fn [^PersistentVector x, ^PersistentVector y]
+           (compare (.nth x 0) (.nth y 0))))
 
-    (.write output (unchecked-int d))
+    (write-byte! output d)
     (dotimes [i n]
       (let [^PersistentVector kv (aget arr i)]
         (write-netstring* output (string>payload (.nth kv 0)))
         (write-bencode output (.nth kv 1))))
-    (.write output (unchecked-int e))))
+    (write-byte! output e)))
+
+(defn- write-bencode-integer [n, ^#?(:clj java.io.OutputStream :cljr System.IO.Stream) output]
+  (doto output
+    (write-byte! i)
+    (write-bytes! (string>payload (str n)))
+    (write-byte! e)))
 
 (extend-protocol BencodeSerializable
   nil
@@ -348,14 +386,14 @@ Wrong first byte: %s (must be %d)." first-byte d) {})))))
     ;; Treat nil as an empty list.
     (write-bencode* [] output))
 
-  InputStream
+  #?(:clj java.io.InputStream :cljr System.IO.Stream)
   (write-bencode* [stream output]
     ;; Streaming does not really work, since we need to know the number of bytes
     ;; to write upfront. So we read in everything for InputStreams and pass on
     ;; the byte array.
-    (let [bytes (ByteArrayOutputStream.)]
-      (io/copy stream bytes)
-      (write-netstring* output (.toByteArray bytes))))
+    (let [bytes (io/byte-sink)]
+      (io/copy! stream bytes)
+      (write-netstring* output (io/sink->bytes bytes))))
 
   IPersistentMap
   (write-bencode* [m output] (write-bencode-map m output))
@@ -363,14 +401,12 @@ Wrong first byte: %s (must be %d)." first-byte d) {})))))
   IPersistentCollection
   (write-bencode* [coll output] (write-bencode-list coll output))
 
-  Number
-  (write-bencode* [n, ^OutputStream output]
-    (if (integer? n)
-      (doto output
-        (.write (unchecked-int i))
-        (.write (string>payload (str n)))
-        (.write (unchecked-int e)))
-      (throw-illegal-value n "value")))
+  #?@(:clj
+      [Number
+       (write-bencode* [n output]
+                       (if (integer? n)
+                         (write-bencode-integer n output)
+                         (throw-illegal-value n "value")))])
 
   String
   (write-bencode* [s output]
@@ -390,13 +426,16 @@ Wrong first byte: %s (must be %d)." first-byte d) {})))))
     ;; In the catch-all, check a few more conditions that are not easy to
     ;; declare as separate types.
     (cond
+      #?@(:cljr [(integer? o)
+                 (write-bencode-integer o output)])
+
       ;; The easiest case is of course when we already have a byte array.
       ;; We can simply pass it on to the underlying machinery.
-      (-> o class .getComponentType (= Byte/TYPE))
+      (io/byte-array? o)
       (write-netstring* output o)
 
       ;; Treat other arrays as lists.
-      (.isArray (class o))
+      (io/array? o)
       (write-bencode-list o output)
 
       :else (throw-illegal-value o "value"))))

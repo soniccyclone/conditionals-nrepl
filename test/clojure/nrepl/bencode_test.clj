@@ -227,6 +227,37 @@
    [value valid-bencode-input-generator]
    (= value (>input (>output value :writer write-bencode) :reader read-bencode))))
 
+(defn- encoded-latin1
+  [write-fn value]
+  (let [out (ByteArrayOutputStream.)]
+    (write-fn out value)
+    (String. (.toByteArray out) "ISO-8859-1")))
+
+(deftest write-path-exact-bytes-test
+  (testing "netstring: length digits, colon, content, trailing comma"
+    (is (= "2:ab," (encoded-latin1 write-netstring (>bytes "ab")))))
+  (testing "every write site of a bencode value, with sorted map keys"
+    (is (= (str "d"
+                "5:a-sym" "6:ns/sym"
+                "5:array" "l1:xi2ee"
+                "5:bytes" "3:\u0001\u0002\u0003"
+                "5:empty" "l0:0:e"
+                "4:ints" "li2ei3ei4ei5ei6ei9223372036854775807ee"
+                "4:list" "li1ei-42ei0e2:\u00c3\u00a92:kw3:symlee"
+                "3:map" "d6:nesteddee"
+                "5:z/key" "6:stream"
+                "e")
+           (encoded-latin1 write-bencode
+                           {:z/key (ByteArrayInputStream. (>bytes "stream"))
+                            'a-sym 'ns/sym
+                            "list" [1 -42 0 "\u00e9" :kw 'sym nil]
+                            "bytes" (byte-array [1 2 3])
+                            "array" (object-array ["x" 2])
+                            "map" {"nested" {}}
+                            "ints" [(int 2) (short 3) (byte 4) 5N (biginteger 6)
+                                    Long/MAX_VALUE]
+                            "empty" ["" (byte-array 0)]})))))
+
 ;; ## Performance testing
 ;;
 ;; This code is to be run manually, so it is in a comment block. Evaluate the

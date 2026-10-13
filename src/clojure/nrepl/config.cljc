@@ -11,24 +11,23 @@
   {:author "Bozhidar Batsov"
    :added  "0.5"}
   (:require
-   [clojure.edn :as edn]
-   [clojure.java.io :as io]
-   [clojure.string :as str]))
+   [clojure.string :as str]
+   [nrepl.util.runtime :as runtime]))
 
 (def ^:private home-dir
   "The user's home directory."
-  (System/getProperty "user.home"))
+  (runtime/home-dir))
 
 (def ^:private xdg-config-default-dir
   "Default XDG config directory (~/.config)."
-  (io/file home-dir ".config"))
+  (runtime/path-join home-dir ".config"))
 
 (defn- non-empty-env
   "Get the value of the environment variable.
   Return the value of the environment variable if it's non-empty,
   or `nil` otherwise."
   [env-var]
-  (let [value (System/getenv env-var)]
+  (let [value (runtime/getenv env-var)]
     (when-not (str/blank? value) value)))
 
 (def ^:private config-file-name "nrepl.edn")
@@ -46,32 +45,26 @@
   file exists in any of these locations, return the default path
   `~/.nrepl/nrepl.edn`."
   (let [candidates
-        [(some-> (non-empty-env "NREPL_CONFIG_DIR") (io/file config-file-name))
-         (some-> (non-empty-env "XDG_CONFIG_HOME") (io/file "nrepl" config-file-name))
-         (io/file xdg-config-default-dir "nrepl" config-file-name)
-         (io/file home-dir ".nrepl" config-file-name)]]
-    (or (some (fn [^java.io.File file]
-                (when (and file (.exists file)) file))
+        [(some-> (non-empty-env "NREPL_CONFIG_DIR") (runtime/path-join config-file-name))
+         (some-> (non-empty-env "XDG_CONFIG_HOME") (runtime/path-join "nrepl") (runtime/path-join config-file-name))
+         (-> xdg-config-default-dir (runtime/path-join "nrepl") (runtime/path-join config-file-name))
+         (-> home-dir (runtime/path-join ".nrepl") (runtime/path-join config-file-name))]]
+    (or (some (fn [file]
+                (when (and file (runtime/path-exists? file)) file))
               candidates)
         (last candidates))))
 
 (def config-dir
   "nREPL's global configuration directory."
-  (.getParentFile ^java.io.File config-file))
-
-(defn- load-edn
-  "Load edn from an io/reader source (filename or io/resource)."
-  [source]
-  (with-open [r (io/reader source)]
-    (edn/read (java.io.PushbackReader. r))))
+  (runtime/parent-dir config-file))
 
 (defn- load-config
   "Load the configuration file identified by `file`.
   Return its contents as EDN if the file exists,
   or an empty map otherwise."
-  [^java.io.File file]
-  (if (.exists file)
-    (load-edn file)
+  [file]
+  (if (runtime/path-exists? file)
+    (runtime/read-edn-file file)
     {}))
 
 (def config
@@ -82,4 +75,4 @@
   nREPL."
   (merge
    (load-config config-file)
-   (load-config (io/file ".nrepl.edn"))))
+   (load-config (runtime/path-join ".nrepl.edn"))))

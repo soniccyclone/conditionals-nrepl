@@ -44,7 +44,9 @@
   (is+ {:ops (mc/all-of
               (mc/via #(set (map name (keys %))) built-in-ops)
               (fn [ops] (every? #(seq (:doc %)) (vals ops))))
-        :aux {:current-ns "user"}}
+        :aux {:current-ns "user"
+              :host {:name "jvm"
+                     :can-stop-threads #(contains? #{"true" "false"} %)}}}
        (->> (nrepl/message timeout-client
                            {:op "describe" :verbose? "true"})
             (map clean-response)

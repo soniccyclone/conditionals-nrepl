@@ -73,7 +73,7 @@ Optional parameters::
 
 
 Returns::
-* `:aux` Map of auxiliary data contributed by all of the active nREPL middleware via :describe-fn functions in their descriptors.
+* `:aux` Map of auxiliary data contributed by all of the active nREPL middleware via :describe-fn functions in their descriptors. The "host" key is always present: {"name" the host the server runs on, e.g. "jvm" or "clr"; "can-stop-threads" "true" or "false", whether ``interrupt`` can force-stop an eval thread that ignores the interrupt}.
 * `:middleware` Current middleware stack, in inside-out order (earliest middleware is last).
 * `:ops` Map of "op"erations supported by this nREPL endpoint
 * `:versions` Map containing version maps (like \*clojure-version*, e.g. major, minor, incremental, and qualifier keys) for values, component names as keys. Common keys include "nrepl" and "clojure".
@@ -132,7 +132,7 @@ Returns::
 
 === `interrupt`
 
-Attempts to interrupt some executing request. When interruption succeeds, the thread used for execution is killed, and a new thread spawned for the session. While the session middleware ensures that Clojure dynamic bindings are preserved, other ThreadLocals are not. Hence, when running code intimately tied to the current thread identity, it is best to avoid interruptions. On Java 20 and later, if ``-Djdk.attach.allowAttachSelf`` is enabled, the JVMTI agent will be used to attempt to stop the thread.
+Attempts to interrupt some executing request. When interruption succeeds, the thread used for execution is killed, and a new thread spawned for the session. While the session middleware ensures that Clojure dynamic bindings are preserved, other ThreadLocals are not. Hence, when running code intimately tied to the current thread identity, it is best to avoid interruptions. On Java 20 and later, if ``-Djdk.attach.allowAttachSelf`` is enabled, the JVMTI agent will be used to attempt to stop the thread. A thread that is still running 5 seconds after the interrupt is stopped forcibly; set the ``:force-interrupt`` config key to false to disable that and only interrupt it.
 
 Required parameters::
 * `:session` The ID of the session used to start the request to be interrupted.

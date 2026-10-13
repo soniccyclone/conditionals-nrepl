@@ -9,13 +9,11 @@
    [nrepl.middleware.print :as print]
    [nrepl.misc :as misc :refer [uuid response-for log]]
    [nrepl.transport :as t]
-   [nrepl.util.classloader :as classloader]
+   [nrepl.util.io :as io]
+   #?(:cljr [nrepl.util.runtime :as runtime])
    [nrepl.util.threading :as threading])
-  (:import
-   (clojure.lang Compiler LineNumberingPushbackReader)
-   (java.util.concurrent Executors ExecutorService LinkedBlockingQueue)
-   (nrepl SessionThread)
-   (nrepl.in QueuePollingReader)))
+  #?(:clj (:import
+           (clojure.lang Compiler))))
 
 (def ^:private sessions (atom {}))
 
@@ -39,18 +37,17 @@
 
 (def ephemeral-executor
   "Executor for running eval requests in ephemeral sessions."
-  (delay (Executors/newCachedThreadPool
-          (threading/thread-factory "nREPL-ephemeral-session-%d"))))
+  (delay (threading/make-executor {:name-fmt "nREPL-ephemeral-session-%d"})))
 
 (defn- session-in
-  "Returns a QueuePollingReader (that is suitable for binding to *in* when
-  wrapped into LineNumberingPushbackReader). When something attempts to read
+  "Returns a stdin reader (that is suitable for binding to *in* when
+  wrapped into a line-numbering reader). When something attempts to read
   from it, it will (if empty) send a {:status :need-input} message on the
   provided transport so the client/user can provide content to be read."
   [session-id transport]
-  (QueuePollingReader. #(t/send transport
-                                (response-for *msg* :session session-id
-                                              :status :need-input))))
+  (io/stdin-reader #(t/send transport
+                            (response-for *msg* :session session-id
+                                          :status :need-input))))
 
 (let [state (atom {})]
   (defn- dynvar-defaults-from-config []
@@ -87,7 +84,8 @@
           #'*print-namespace-maps*   true
           #'*data-readers*           *data-readers*
           #'*default-data-reader-fn* *default-data-reader-fn*
-          #'*compile-path*           (System/getProperty "clojure.compile.path" "classes")
+          #'*compile-path*           #?(:clj (System/getProperty "clojure.compile.path" "classes")
+                                        :cljr (or (runtime/getenv "CLOJURE_COMPILE_PATH") "."))
           #'*command-line-args*      *command-line-args*
           #'*unchecked-math*         *unchecked-math*
           #'*assert*                 *assert*
@@ -125,10 +123,10 @@
         opts {::print/buffer-size (or out-limit (get (meta session) :out-limit))}
         out (print/replying-PrintWriter :out msg opts)
         err (print/replying-PrintWriter :err msg opts)
-        ctxcl (.getContextClassLoader (Thread/currentThread))]
+        #?@(:clj [ctxcl (.getContextClassLoader (Thread/currentThread))])]
     (-> bindings-map
         (assoc #'*msg* msg
-               Compiler/LOADER ctxcl
+               #?@(:clj [Compiler/LOADER ctxcl])
                #'*out* out
                #'*err* err
                ;; clojure.test captures *out* at load-time, so we need to make
@@ -149,14 +147,16 @@
   - thunk, a Runnable, the task itself
   - ack, another Runnable, ran to notify of successful execution of thunk"
   [session msg]
-  (fn [_id ^Runnable thunk ^Runnable ack & [explicit-msg]]
+  (fn [_id #?(:clj ^Runnable thunk :cljr thunk) #?(:clj ^Runnable ack :cljr ack) & [explicit-msg]]
     (let [f #(let [bindings (add-per-message-bindings (or explicit-msg msg)
                                                       @session)]
                (push-thread-bindings bindings)
-               (try (.run thunk)
-                    (some-> ack .run)
+               (try #?(:clj (.run thunk)
+                       :cljr (thunk))
+                    #?(:clj (some-> ack .run)
+                       :cljr (when ack (ack)))
                     (finally (pop-thread-bindings))))]
-      (.submit ^ExecutorService @ephemeral-executor ^Runnable f))))
+      (threading/submit! @ephemeral-executor f))))
 
 (defn- create-session
   "Return a new session atom that contains a map of dynamic variables needed for
@@ -170,7 +170,7 @@
          new-session (atom (assoc (if session
                                     @session
                                     (gather-initial-bindings msg))
-                                  #'*in* (LineNumberingPushbackReader. qpr)
+                                  #'*in* (io/line-numbering-reader qpr)
                                   #'*ns* (create-ns 'user))
                            :meta {:id id
                                   :out-limit (or out-limit (:out-limit (meta session)))
@@ -196,20 +196,21 @@
         session-loop
         #(try
            (loop []
-             (let [{:keys [^LinkedBlockingQueue queue]} @state
-                   [exec-id ^Runnable r ^Runnable ack msg] (.take queue)
+             (let [{:keys [queue thread]} @state
+                   [exec-id r #?(:clj ^Runnable ack :cljr ack) msg] (threading/take! queue)
                    exec-id (or exec-id (uuid)) ;; :id may be absent in msg.
                    bindings (add-per-message-bindings msg @session)]
                (swap! state assoc :running exec-id)
                (push-thread-bindings bindings)
-               (if (fn? r)
-                 (r) ;; -1 stack frame this way.
-                 (.run r))
+               (threading/run-interruptible thread
+                                            (if (fn? r)
+                                              (r) ;; -1 stack frame this way.
+                                              #?(:clj (.run ^Runnable r))))
                (swap! session (fn [current]
                                 (-> (merge current (get-thread-bindings))
                                     ;; Remove vars that we don't want to save
                                     ;; into the session.
-                                    (dissoc #'*msg* Compiler/LOADER))))
+                                    (dissoc #'*msg* #?@(:clj [Compiler/LOADER])))))
                ;; We don't use try/finally here because if the eval throws an
                ;; exception, we're going to discard the whole thread. This makes
                ;; the stack cleaner.
@@ -218,20 +219,22 @@
                  (when (and (= (:running state-d) exec-id)
                             (compare-and-set! state state-d
                                               (assoc state-d :running nil)))
-                   (some-> ack .run)
+                   #?(:clj (some-> ack .run)
+                      :cljr (when ack (ack)))
                    (recur)))))
-           (catch InterruptedException _e)
+           (catch #?(:clj InterruptedException :cljr System.Threading.ThreadInterruptedException) _e)
            (catch Exception _e
              ;; This should never happen with valid middleware and clients. If
              ;; it does, at least make sure the session remains healthy.
              (@reset-state-holder)))
         reset-state
-        #(let [thread (SessionThread. session-loop (str "nREPL-session-" id)
-                                      (classloader/dynamic-classloader))]
-           (reset! state {:queue (LinkedBlockingQueue.)
+        #(let [thread (threading/session-thread (str "nREPL-session-" id)
+                                                session-loop)
+               queue (threading/make-queue)]
+           (reset! state {:queue queue
                           :running nil
                           :thread thread})
-           (.start thread))]
+           (threading/start-session-thread! thread))]
     (reset! reset-state-holder reset-state)
     (reset-state)
     ;; This map is added to the meta of the session object by `register-session`,
@@ -262,7 +265,7 @@
                 (this exec-id r ack *msg*)
                 (log "*msg* is unbound in a persistent session.")))
              ([exec-id r ack msg]
-              (.put ^LinkedBlockingQueue (:queue @state) [exec-id r ack msg])))}))
+              (threading/put! (:queue @state) [exec-id r ack msg])))}))
 
 (defn- register-session
   "Registers a new session containing the baseline bindings contained in the
@@ -365,7 +368,7 @@
                                         "client-version" "The nREPL client version. e.g. \"1.2.3\""}
                              :returns {"new-session" "The ID of the new session."}}
                             "interrupt"
-                            {:doc "Attempts to interrupt some executing request. When interruption succeeds, the thread used for execution is killed, and a new thread spawned for the session. While the session middleware ensures that Clojure dynamic bindings are preserved, other ThreadLocals are not. Hence, when running code intimately tied to the current thread identity, it is best to avoid interruptions. On Java 20 and later, if `-Djdk.attach.allowAttachSelf` is enabled, the JVMTI agent will be used to attempt to stop the thread."
+                            {:doc "Attempts to interrupt some executing request. When interruption succeeds, the thread used for execution is killed, and a new thread spawned for the session. While the session middleware ensures that Clojure dynamic bindings are preserved, other ThreadLocals are not. Hence, when running code intimately tied to the current thread identity, it is best to avoid interruptions. On Java 20 and later, if `-Djdk.attach.allowAttachSelf` is enabled, the JVMTI agent will be used to attempt to stop the thread. A thread that is still running 5 seconds after the interrupt is stopped forcibly; set the `:force-interrupt` config key to false to disable that and only interrupt it."
                              :requires {"session" "The ID of the session used to start the request to be interrupted."}
                              :optional {"interrupt-id" "The opaque message ID sent with the request to be interrupted."}
                              :returns {"status" "'interrupted' if a request was identified and interruption will be attempted
@@ -389,10 +392,10 @@
   [h]
   (fn [{:keys [op stdin session] :as msg}]
     (if (= op "stdin")
-      (let [^QueuePollingReader qpr (::queue-reader (meta session))]
+      (let [qpr (::queue-reader (meta session))]
         (if (empty? stdin)
-          (.addEof qpr)
-          (.addInput qpr stdin))
+          (io/add-eof! qpr)
+          (io/add-input! qpr stdin))
         (t/respond-to msg :status :done))
       (h msg))))
 

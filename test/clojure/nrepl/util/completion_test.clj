@@ -4,11 +4,16 @@
             [clojure.test :refer :all]
             [matcher-combinators.matchers :as mc]
             [nrepl.util.completion :as completion :refer [completions]]
-            [nrepl.test-helpers :refer [is+]]))
+            [nrepl.test-helpers :refer [is+]])
+  (:import (java.io File)))
 
 (def t-var "var" nil)
 (defn t-fn "fn" [x] x)
 (defmacro t-macro "macro" [y] y)
+(def t-ord-Zed nil)
+(def t-ord-alpha nil)
+(def t-ord-Beta nil)
+(def t-ord-gamma nil)
 
 (defn- candidates
   "Return only the candidate names without any additional
@@ -99,9 +104,21 @@
     (is+ (mc/embeds [{:candidate "Integer/parseInt" :type :static-method}])
          (completions "Integer/parseInt" 'clojure.core))
     (is+ (mc/embeds [{:candidate "File/separator", :type :static-field}])
-         (completions "File/" 'nrepl.util.completion))
+         (completions "File/" 'nrepl.util.completion-test))
     (is+ (mc/embeds [{:candidate ".toString" :type :method}])
          (completions ".toString" 'clojure.core))))
+
+(deftest default-package-class-completion-test
+  (with-redefs [completion/primitive-cache (atom {})
+                completion/classes-on-classpath (fn [] ["DefaultPkgClass" "a.b.Other"])
+                completion/root-packages-on-classpath (fn [] #{"a"})
+                completion/namespaces&files-on-classpath (fn [] [])]
+    (is+ (mc/embeds [{:candidate "DefaultPkgClass" :type :class}])
+         (completions "DefaultPkg" 'nrepl.util.completion-test))))
+
+(deftest candidate-order-test
+  (is+ ["t-ord-Beta" "t-ord-Zed" "t-ord-alpha" "t-ord-gamma"]
+       (candidates "t-ord" 'nrepl.util.completion-test)))
 
 (deftest keyword-completions-test
   (testing "colon prefix"

@@ -2,9 +2,10 @@
   "Misc utilities used in nREPL's implementation (potentially also
   useful for anyone extending it)."
   {:author "Chas Emerick"}
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str]
-            [nrepl.config :refer [config]]))
+  (:require [clojure.string :as str]
+            [nrepl.config :refer [config]]
+            [nrepl.util.reflect :as reflect]
+            [nrepl.util.runtime :as runtime]))
 
 (defn log
   "Log a message to *err*. The first argument can optionally be a keyword
@@ -14,18 +15,18 @@
   (let [[kw ex-or-msg msgs] (if (keyword? ?kw)
                               [?kw ex-or-msg msgs]
                               [:error ?kw (cons ex-or-msg msgs)])
-        ex (when (instance? Throwable ex-or-msg) ex-or-msg)
+        ex (when (instance? #?(:clj Throwable :cljr Exception) ex-or-msg) ex-or-msg)
         msgs (if ex msgs (filter identity (cons ex-or-msg msgs)))]
     (binding [*out* *err*]
       (apply println (str (str/upper-case (name kw)) ":") msgs)
-      (when ex (.printStackTrace ^Throwable ex (java.io.PrintWriter. *out*))))))
+      (when ex (runtime/print-stack-trace ex *out*)))))
 
 (defmacro log-exceptions
   "Execute body, logging and re-throwing any exception."
   [& body]
   `(try
      ~@body
-     (catch Throwable ex#
+     (catch #?(:clj Throwable :cljr Exception) ex#
        (log ex#)
        (throw ex#))))
 
@@ -39,7 +40,8 @@
 (defn uuid
   "Returns a new UUID string."
   []
-  (str (java.util.UUID/randomUUID)))
+  #?(:clj (str (java.util.UUID/randomUUID))
+     :cljr (str (System.Guid/NewGuid))))
 
 (defn take-until
   "Like (take-while (complement f) coll), but includes the first item in coll that
@@ -93,22 +95,23 @@
   "Bind `clojure.lang.Compiler/LOADER` to the context classloader. This is
   required to get hotloading with pomegranate working under certain conditions."
   [& body]
-  `(let [cl# (.getContextClassLoader (Thread/currentThread))]
-     (with-bindings {clojure.lang.Compiler/LOADER cl#}
-       ~@body)))
+  #?(:clj `(let [cl# (.getContextClassLoader (Thread/currentThread))]
+             (with-bindings {clojure.lang.Compiler/LOADER cl#}
+               ~@body))
+     :cljr `(do ~@body)))
 
-(defn parse-java-version
-  "Parse Java version string according to JEP 223 and return version as a number."
-  []
-  (try (let [s (System/getProperty "java.specification.version")
-             [major minor _] (str/split s #"\.")
-             major (Integer/parseInt major)]
-         (if (> major 1)
-           major
-           (Integer/parseInt minor)))
-       (catch Exception _ 8)))
+(defn parse-int
+  [s]
+  #?(:clj (Integer/parseInt s)
+     :cljr (Int32/Parse s)))
 
-(def java-version "Current Java version number." (parse-java-version))
+#?(:clj
+   (defn parse-java-version
+     "Parse Java version string according to JEP 223 and return version as a number."
+     []
+     (runtime/parse-java-version)))
+
+(def java-version "Current Java version number." runtime/java-version)
 
 (defn java-8?
   "Util to check if we are using Java 8. Useful for features that behave
@@ -122,7 +125,7 @@
   []
   ;; -Djdk.attach.allowAttachSelf sets the property to "" if it is present,
   ;; otherwise that property will be nil.
-  (boolean (System/getProperty "jdk.attach.allowAttachSelf")))
+  (runtime/attach-self-enabled?))
 
 (defn jvmti-agent-enabled?
   "Return true if nREPL is allowed to load its JVMTI agent at runtime."
@@ -149,10 +152,16 @@
     (str (if (string? value)
            ;; try to convert relative file paths like "clojure/core.clj"
            ;; to absolute file paths
-           (or (io/resource value) value)
+           (or (reflect/resource-path value) value)
            ;; If :file is a File or URL object we just return it as is
            ;; and convert it to string
            value))))
+
+(defn ->wire-string
+  [v]
+  (if (boolean? v)
+    (if v "true" "false")
+    (str v)))
 
 (defn sanitize-meta
   "Sanitize a Clojure metadata map such that it can be bencoded."
@@ -163,8 +172,8 @@
       (update :name str)
       (update :protocol str)
       (update :file handle-file-meta)
-      (cond-> (:deprecated m) (update :deprecated str))
-      (cond-> (:macro m) (update :macro str))
-      (cond-> (:special-form m) (update :special-form str))
+      (cond-> (:deprecated m) (update :deprecated ->wire-string))
+      (cond-> (:macro m) (update :macro ->wire-string))
+      (cond-> (:special-form m) (update :special-form ->wire-string))
       (assoc :arglists-str (str (:arglists m)))
       (cond-> (:arglists m) (update :arglists str))))

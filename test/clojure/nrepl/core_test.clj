@@ -19,6 +19,7 @@
                                  response-values
                                  url-connect]]
    [nrepl.ack :as ack]
+   [nrepl.config :as config]
    [nrepl.middleware.caught :as middleware.caught]
    [nrepl.middleware.print :as middleware.print]
    [nrepl.middleware.session :as session]
@@ -573,6 +574,145 @@
                               [1000 500 0])]
       (is (apply > (map deref elapsed-times))))))
 
+(def-repl-test thread-naming-test
+  (testing "a persistent session evaluates on a daemon thread named after the session"
+    (let [responses (vec (repl-eval session "[(.getName (Thread/currentThread)) (.isDaemon (Thread/currentThread))]"))
+          sid (:session (first responses))]
+      (is+ [[(str "nREPL-session-" sid) true]]
+           (response-values responses))))
+  (testing "an ephemeral session evaluates on a daemon thread of the ephemeral executor"
+    (let [[thread-name daemon?] (first (repl-values client "[(.getName (Thread/currentThread)) (.isDaemon (Thread/currentThread))]"))]
+      (is (re-matches #"nREPL-ephemeral-session-\d+" thread-name))
+      (is (true? daemon?))))
+  (testing "the per-connection loop and the message handlers run on their own executors"
+    (let [greeted (promise)
+          handled (promise)
+          handler (fn [_msg] (deliver handled (.getName (Thread/currentThread))))]
+      (with-open [^Server server (server/start-server
+                                  :transport-fn *transport-fn*
+                                  :handler handler
+                                  :greeting-fn (fn [_transport]
+                                                 (deliver greeted (.getName (Thread/currentThread)))))
+                  conn (connect :port (:port server) :transport-fn *transport-fn*)]
+        (is (re-matches #"nREPL-connection-\d+" (deref greeted 5000 "")))
+        (transport/send conn {:op "eval" :code "1"})
+        (is (re-matches #"nREPL-handler-\d+" (deref handled 5000 "")))))))
+
+(def-repl-test eval-adds-no-frames-to-the-session-thread-stack
+  (is+ [3] (repl-values session
+                        (code (let [frames (.getStackTrace (Thread/currentThread))
+                                    run-frame (first (keep-indexed
+                                                      (fn [i frame]
+                                                        (when (re-find #"interruptible_eval.*[$]run__\d+$"
+                                                                       (.getClassName ^StackTraceElement frame))
+                                                          i))
+                                                      frames))]
+                                (- (count frames) run-frame))))))
+
+(defn- drain
+  [transport timeout-ms]
+  (vec (take-while some? (repeatedly #(transport/recv transport timeout-ms)))))
+
+(defn- has-status?
+  [msg status]
+  (boolean (some #{status (name status)} (:status msg))))
+
+(defn- spin-and-interrupt
+  "Starts `code` on a new session, interrupts it 300 ms later and returns the
+  session id along with every message the server sent in the following 2.5 s."
+  [client transport code]
+  (let [sid (new-session client)]
+    (transport/send transport {:op "eval" :id "spin" :session sid :code code})
+    (Thread/sleep 300)
+    (transport/send transport {:op "interrupt" :id "interrupt" :session sid})
+    {:session sid
+     :messages (drain transport 2500)}))
+
+(when-not win?
+  (def-repl-test session-thread-survives-the-reaper
+    (with-redefs [threading/force-stop-delay-ms 500]
+      (message timeout-session {:op "eval"
+                                :code (code (while true))})
+      (Thread/sleep 300)
+      (is+ {:status #{:done}}
+           (-> (message timeout-session {:op "interrupt"})
+               first
+               clean-response))
+      (repl-values timeout-session "(def t2 (Thread/currentThread))")
+      (Thread/sleep 1500)
+      (is+ [true] (repl-values timeout-session "(identical? t2 (Thread/currentThread))"))))
+
+  (def-repl-test forced-stop-sends-no-eval-error
+    (with-redefs [threading/force-stop-delay-ms 500]
+      (let [{sid :session messages :messages}
+            (spin-and-interrupt client transport
+                                (code (do (def curr-t (Thread/currentThread))
+                                          (while true))))]
+        (is (some #(and (= "spin" (:id %)) (has-status? % :interrupted)) messages))
+        (is (not-any? #(has-status? % :eval-error) messages))
+        (is+ ["TERMINATED"]
+             (response-values (message client {:op "eval" :session sid
+                                               :code "(str (.getState curr-t))"}))))))
+
+  (def-repl-test forced-stop-runs-finally
+    (with-redefs [threading/force-stop-delay-ms 500]
+      (message session {:op "eval"
+                        :code (code (let [p (promise)]
+                                      (def p p)
+                                      (try (loop [] (recur))
+                                           (finally (deliver p :ran)))))})
+      (Thread/sleep 300)
+      (is+ {:status #{:done}}
+           (-> (message session {:op "interrupt"})
+               first
+               clean-response))
+      (Thread/sleep (+ 500 1000))
+      (is+ [true] (repl-values session "(realized? p)"))))
+
+  (def-repl-test interrupt-swallowed-by-user-catch-is-force-stopped
+    (with-redefs [threading/force-stop-delay-ms 500]
+      (message session {:op "eval"
+                        :code (code (do (def curr-t (Thread/currentThread))
+                                        (try (Thread/sleep 30000)
+                                             (catch InterruptedException _
+                                               (loop [] (recur))))))})
+      (Thread/sleep 300)
+      (is+ {:status #{:done}}
+           (-> (message session {:op "interrupt"})
+               first
+               clean-response))
+      (Thread/sleep (+ 500 1000))
+      (is+ ["TERMINATED"] (repl-values session "(str (.getState curr-t))"))))
+
+  (def-repl-test force-interrupt-false-keeps-the-thread
+    (with-redefs [threading/force-stop-delay-ms 300
+                  config/config {:force-interrupt false}]
+      (message session {:op "eval"
+                        :code (code (do (def vol (volatile! 0))
+                                        (def stop? (volatile! false))
+                                        (def curr-t (Thread/currentThread))
+                                        (while (not @stop?)
+                                          (vswap! vol inc))))})
+      (Thread/sleep 300)
+      (is+ {:status #{:done}}
+           (-> (message session {:op "interrupt"})
+               first
+               clean-response))
+      (Thread/sleep (+ 300 1000))
+      (is+ ["RUNNABLE"] (repl-values session "(str (.getState curr-t))"))
+      (is+ ["TERMINATED"] (repl-values session
+                                       (code (do (vreset! stop? true)
+                                                 (.join curr-t 5000)
+                                                 (str (.getState curr-t)))))))))
+
+(def-repl-test blocked-ephemeral-evals-do-not-starve-handling
+  (dotimes [_ 32]
+    (message client {:op "eval" :code "(Thread/sleep 60000)"}))
+  (testing "a session eval is still answered"
+    (is+ [2] (repl-values timeout-session "(+ 1 1)")))
+  (testing "a session-less eval is still answered"
+    (is+ [2] (repl-values timeout-client "(+ 1 1)"))))
+
 (def-repl-test ensure-transport-closeable
   (is (= [5] (repl-values session "5")))
   (is (instance? java.io.Closeable transport))
@@ -591,7 +731,7 @@
   ;; transport's own "lost its connection" message.
   (let [^Throwable cause (root-cause e)]
     (and (instance? SocketException cause)
-         (re-find #"(?i)(lost.*connection|socket closed|connection reset)" (.getMessage cause)))))
+         (re-find #"(?i)(lost.*connection|socket closed|connection reset)" (ex-message cause)))))
 
 (deftest transports-fail-on-disconnects
   (testing "Ensure that transports fail ASAP when the server they're connected to goes down."
@@ -733,6 +873,38 @@
                                      (:port *server*)))]
     (let [cli (nrepl/client conn Long/MAX_VALUE)]
       (is (= 2 (th/eval-value1 cli '(+ 1 1)))))))
+
+(def-repl-test test-url-connect-uri-object
+  (with-open [^nrepl.transport.FnTransport
+              conn (url-connect (java.net.URI. (str (transport-fn->protocol *transport-fn*)
+                                                    "://127.0.0.1:"
+                                                    (:port *server*))))]
+    (let [cli (nrepl/client conn Long/MAX_VALUE)]
+      (is (= 2 (th/eval-value1 cli '(+ 1 1)))))))
+
+(deftest url-connect-errors
+  (testing "an unknown scheme is rejected with the scheme and url in the message"
+    (let [e (try (url-connect "gopher://example.org:70")
+                 (catch IllegalArgumentException e e))]
+      (is (instance? IllegalArgumentException e))
+      (is (= "No nREPL support known for scheme gopher, url gopher://example.org:70"
+             (ex-message e)))))
+  (testing "the scheme is matched case-insensitively"
+    (is (= "nrepl" (nrepl/uri-scheme "NREPL://localhost:7888")))))
+
+(deftest socket-info
+  (testing "host and port are taken from the url"
+    (is (= {:host "example.org" :port 4005}
+           (#'nrepl/socket-info "nrepl://example.org:4005"))))
+  (testing "a url without a port has no :port"
+    (is (= {:host "example.org"}
+           (#'nrepl/socket-info "telnet://example.org")))))
+
+(deftest connect-requires-host-and-port-or-socket
+  (let [e (try (connect :host "127.0.0.1")
+               (catch IllegalArgumentException e e))]
+    (is (instance? IllegalArgumentException e))
+    (is (= "A host plus port or a socket must be supplied to connect." (ex-message e)))))
 
 (deftest test-ack
   (with-open [s (server/start-server :transport-fn *transport-fn*
@@ -889,7 +1061,7 @@
 (defn custom-session-repl-caught
   [^Throwable t]
   (binding [*out* *err*]
-    (println "bar" (.getMessage t))))
+    (println "bar" (ex-message t))))
 
 (def-repl-test session-caught-options
   (testing "setting *caught-fn* works"

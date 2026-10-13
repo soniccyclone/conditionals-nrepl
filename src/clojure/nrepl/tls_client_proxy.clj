@@ -72,7 +72,7 @@
     (.accept server)
     (catch Exception e
       (when (running? state)
-        (error "Error during .accept:" (.getMessage e)))
+        (error "Error during .accept:" (ex-message e)))
       nil)))
 
 (defmacro socket-thread [state sock other-sock f]
@@ -91,7 +91,7 @@
                (close other-sock#)
                (swap! state# update :sockets (fnil disj #{}) sock#))))
          (catch Throwable t#
-           (error "Unhandled exception:" (.getMessage t#))
+           (error "Unhandled exception:" (ex-message t#))
            (swap! state# update :unhandled-exceptions (fnil conj #{}) t#))
          (finally
            (swap! state# update :threads (fnil disj #{}) (Thread/currentThread)))))))
@@ -103,7 +103,7 @@
         v))
     (catch Exception e
       (when (running? state)
-        (warn "Exception while reading from socket:" (.getMessage e)))
+        (warn "Exception while reading from socket:" (ex-message e)))
       nil)))
 
 (defn- write-socket [state ^OutputStream out rd flush?]
@@ -114,7 +114,7 @@
     true
     (catch Exception e
       (when (running? state)
-        (warn "Exception while writing to socket:" (.getMessage e)))
+        (warn "Exception while writing to socket:" (ex-message e)))
       nil)))
 
 (defn- available? [state ^InputStream inp]
@@ -123,7 +123,7 @@
       (> v 0))
     (catch Exception e
       (when (running? state)
-        (warn "Exception while calling .available:" (.getMessage e)))
+        (warn "Exception while calling .available:" (ex-message e)))
       nil)))
 
 (defn- pump! [state ^Socket src ^Socket dst]
@@ -156,7 +156,7 @@
                         (catch Exception e
                           (error "Could not connect to remote"
                                  (str remote-host ":" remote-port)
-                                 ". Error message: " (.getMessage e))
+                                 ". Error message: " (ex-message e))
                           (close sock)
                           nil))]
     (socket-thread
@@ -220,14 +220,14 @@
              :tls-context        (try
                                    (tls/ssl-context-or-throw tls-keys-str tls-keys-file)
                                    (catch Exception e
-                                     (err-exit block? (str "Could not create TLS context: " (.getMessage e)))))}]
+                                     (err-exit block? (str "Could not create TLS context: " (ex-message e)))))}]
     (swap! state assoc :port-promise port-promise)
     (socket-thread
      state
      (try
        (socket/inet-socket bind port)
        (catch Exception e
-         (err-exit block? (str "Could not bind to: " bind ":" port ". Error message: " (.getMessage e)))))
+         (err-exit block? (str "Could not bind to: " bind ":" port ". Error message: " (ex-message e)))))
      nil
      (fn [^ServerSocket sock]
        (deliver port-promise (.getLocalPort sock))

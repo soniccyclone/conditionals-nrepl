@@ -11,6 +11,7 @@
   (:require
    [nrepl.misc :as misc]
    [nrepl.transport :as t :refer [safe-handle]]
+   [nrepl.util.runtime :as runtime]
    [nrepl.version :as version]))
 
 ;; Registering dynvars that are used to configure middleware. This lives here
@@ -41,11 +42,6 @@
   [m]
   (into {} (filter (fn [[_ v]] (or (number? v) (string? v))) m)))
 
-(defn- java-version
-  []
-  {:major misc/java-version
-   :version-string (System/getProperty "java.version")})
-
 (defn- describe-reply
   [{:keys [verbose?] :as msg} middleware]
   (let [descriptors (mapv (comp ::descriptor meta) middleware)
@@ -64,9 +60,10 @@
       :versions {:nrepl (safe-version version/version)
                  :clojure (safe-version
                            (assoc *clojure-version* :version-string (clojure-version)))
-                 :java (safe-version (java-version))}
+                 #?(:clj :java :cljr :clr) (safe-version (runtime/host-version))}
       :status :done}
-     (when aux {:aux aux}))))
+     {:aux (assoc aux :host {:name (name runtime/host)
+                             :can-stop-threads (misc/->wire-string (runtime/can-stop-threads?))})})))
 
 (defn wrap-describe
   "Special middleware that accepts the list of all other middleware (except self)
@@ -86,7 +83,7 @@
                              :returns {"ops" "Map of \"op\"erations supported by this nREPL endpoint"
                                        "middleware" "Current middleware stack, in inside-out order (earliest middleware is last)."
                                        "versions" "Map containing version maps (like *clojure-version*, e.g. major, minor, incremental, and qualifier keys) for values, component names as keys. Common keys include \"nrepl\" and \"clojure\"."
-                                       "aux" "Map of auxiliary data contributed by all of the active nREPL middleware via :describe-fn functions in their descriptors."}}}})
+                                       "aux" "Map of auxiliary data contributed by all of the active nREPL middleware via :describe-fn functions in their descriptors. The \"host\" key is always present: {\"name\" the host the server runs on, e.g. \"jvm\" or \"clr\"; \"can-stop-threads\" \"true\" or \"false\", whether `interrupt` can force-stop an eval thread that ignores the interrupt}."}}}})
 
 (defn- comparator
   [{a-requires :requires a-expects :expects a-handles :handles}

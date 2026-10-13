@@ -2,10 +2,12 @@
   "High level nREPL client support."
   {:author "Chas Emerick"}
   (:require
+   [clojure.string :as str]
    [nrepl.misc :refer [take-until uuid]]
    [nrepl.socket :as socket]
    [nrepl.tls :as tls]
    [nrepl.transport :as transport]
+   [nrepl.util.threading :as threading]
    [nrepl.version :as version]))
 
 (defn response-seq
@@ -14,7 +16,7 @@
    The seq will end only when the underlying Transport is closed (i.e.
    returns nil from `recv`) or if a message takes longer than `timeout`
    millis to arrive."
-  ([transport] (response-seq transport Long/MAX_VALUE))
+  ([transport] (response-seq transport threading/infinite-ms))
   ([transport timeout]
    (take-while identity (repeatedly #(transport/recv transport timeout)))))
 
@@ -84,8 +86,8 @@
                                            (when clone
                                              (select-keys clone [:client-name :client-version :session])))))]
     (or (:new-session resp)
-        (throw (IllegalStateException.
-                (str "Could not open new session; :clone response: " resp))))))
+        (throw (new #?(:clj IllegalStateException :cljr InvalidOperationException)
+                    (str "Could not open new session; :clone response: " resp))))))
 
 (defn client-session
   "Returns a function of one argument.  Accepts a message that is sent via the
@@ -144,7 +146,8 @@
     (try
       (assoc msg :value (read-string value))
       (catch Exception e
-        (throw (IllegalStateException. (str "Could not read response value: " value) e))))))
+        (throw (new #?(:clj IllegalStateException :cljr InvalidOperationException)
+                    (str "Could not read response value: " value) e))))))
 
 (defn response-values
   "Given a seq of responses (as from response-seq or returned from any function returned
@@ -181,26 +184,20 @@
     (tls-connect (assoc opts :transport-fn transport-fn :host host))
 
     (and host port)
-    (transport-fn (java.net.Socket. ^String host (int port)))
+    (transport-fn (socket/connect host port))
 
     :else
-    (throw (IllegalArgumentException. "A host plus port or a socket must be supplied to connect."))))
-
-(defn- to-uri ^java.net.URI [x]
-  {:post [(instance? java.net.URI %)]}
-  (if (string? x)
-    (java.net.URI. x)
-    x))
+    (throw (new #?(:clj IllegalArgumentException :cljr ArgumentException)
+                "A host plus port or a socket must be supplied to connect."))))
 
 (defn- socket-info
   [x]
-  (let [uri (to-uri x)
-        port (.getPort uri)]
-    (merge {:host (.getHost uri)}
-           (when (pos? port)
+  (let [{:keys [host port]} (socket/parse-uri x)]
+    (merge {:host host}
+           (when (and port (pos? port))
              {:port port}))))
 
-(def ^{:private false} uri-scheme #(-> (to-uri %) .getScheme .toLowerCase))
+(def ^{:private false} uri-scheme #(-> (socket/parse-uri %) :scheme str/lower-case))
 
 (defmulti url-connect
   "Connects to an nREPL endpoint identified by the given URL/URI.  Valid
@@ -231,12 +228,12 @@
                                          :port 7888})
 (add-socket-connect-method! "nrepl" {:transport-fn transport/bencode
                                      :port 7888})
-(add-socket-connect-method! "telnet" {:transport-fn transport/tty})
+#?(:clj (add-socket-connect-method! "telnet" {:transport-fn transport/tty}))
 
 (defmethod url-connect :default
   [uri]
-  (throw (IllegalArgumentException.
-          (format "No nREPL support known for scheme %s, url %s" (uri-scheme uri) uri))))
+  (throw (new #?(:clj IllegalArgumentException :cljr ArgumentException)
+              (format "No nREPL support known for scheme %s, url %s" (uri-scheme uri) uri))))
 
 (def ^{:deprecated "0.5.0"} version
   "Use `nrepl.version/version` instead.

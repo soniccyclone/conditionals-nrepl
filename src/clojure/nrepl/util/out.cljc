@@ -2,13 +2,13 @@
   "Utilities for injecting output-intercepting writers for System.out and err."
   {:added "1.5"
    :author "Oleksandr Yakushev"}
-  (:require [nrepl.util.threading :as threading])
-  (:import (java.io OutputStreamWriter PrintStream PrintWriter)
-           (nrepl.out CallbackBufferedOutputStream TeeOutputStream)))
+  (:require [nrepl.util.io :as io]
+            [nrepl.util.threading :as threading]))
 
 ;;;; State management
 
 (defonce ^:private original-print-streams (atom {}))
+(defonce ^:private original-roots (atom {}))
 (defonce ^:private callbacks (atom {:out {}, :err {}}))
 
 (defonce ^{:doc "Atom that contains `true` if standard streams have been wrapped
@@ -23,7 +23,7 @@
     (when (empty? og-streams)
       ;; Only need to try once, if another thread sets then we are good.
       (compare-and-set! original-print-streams og-streams
-                        {:out System/out, :err System/err}))))
+                        (io/system-writers)))))
 
 (defn set-callback
   "Register or update a callback that is invoked when output is written to stream.
@@ -48,7 +48,7 @@
   "Run all registered callbacks for the given stream (`:out` or `:err`). Each
   callback should be run in a separate thread to prevent stalling and errors."
   [stream s]
-  (run! #(threading/run-with @threading/transport-executor
+  (run! #(threading/run-with @threading/handle-executor
            (% s))
         (vals (get @callbacks stream))))
 
@@ -70,9 +70,7 @@
   all threads and code running in the same JVM process."
   []
   (letfn [(wrap-stream [stream callback]
-            (PrintStream.
-             (TeeOutputStream. stream
-                               (CallbackBufferedOutputStream. callback 1024))))]
+            (io/tee-writer stream callback))]
     (when-not @wrapped?
       (reset! wrapped? true)
       (capture-original-print-streams)
@@ -82,8 +80,12 @@
             new-err (wrap-stream err (fn global-err-callback [s]
                                        (run-stream-callbacks :err s)))]
         ;; Replace stdout/stderr with wrapped versions. This is a global change.
-        (System/setOut new-out)
-        (System/setErr new-err)
+        (io/install-system-writers! new-out new-err)
+        (let [root-vars (cond-> [#'*out* #'*err*]
+                          (resolve 'clojure.test/*test-out*)
+                          (conj (resolve 'clojure.test/*test-out*)))]
+          (reset! original-roots
+                  (zipmap root-vars (map #(alter-var-root % identity) root-vars))))
         ;; Also, replace global (root) *out* and *err* bindings. While we take
         ;; care of proper *out*/*err* bindings within the evaluation context (in
         ;; threads that run within the nREPL "session"), threads that spawn
@@ -91,10 +93,24 @@
         ;; binding. These root writers don't have their own callback-invoking
         ;; logic, they just write into the wrapped streams that we constructed
         ;; before.
-        (.bindRoot #'*out* (PrintWriter. (OutputStreamWriter. new-out)))
-        (.bindRoot #'*err* (PrintWriter. (OutputStreamWriter. new-err)))
+        (alter-var-root #'*out* (constantly (io/root-writer new-out)))
+        (alter-var-root #'*err* (constantly (io/root-writer new-err)))
         ;; Let's also rebind clojure.test/*test-out* because it captures *out*
         ;; during load time. If the var doesn't resolve, it means clojure.test
         ;; hasn't loaded yet, and we don't need to rebind it.
-        (some-> ^clojure.lang.Var (resolve 'clojure.test/*test-out*)
-                (.bindRoot *out*))))))
+        (some-> (resolve 'clojure.test/*test-out*)
+                (alter-var-root (constantly *out*)))))))
+
+(defn unwrap-standard-streams
+  "Undoes `wrap-standard-streams`: restores the original `System/out` and
+  `System/err` and the root bindings of *out*, *err* and clojure.test/*test-out*
+  that were in place before wrapping. Registered callbacks are kept, so they
+  fire again if the streams are wrapped later. Does nothing if the streams are
+  not currently wrapped."
+  []
+  (when @wrapped?
+    (let [{:keys [out err]} @original-print-streams]
+      (io/install-system-writers! out err)
+      (doseq [[root-var root] @original-roots]
+        (alter-var-root root-var (constantly root)))
+      (reset! wrapped? false))))
