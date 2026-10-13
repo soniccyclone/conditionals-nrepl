@@ -18,10 +18,6 @@
 
 (def ^:private port-token "PORT")
 
-(def ^:private bind-refuses-existing-path?
-  #?(:clj (= :jdk sut/unix-domain-flavor)
-     :cljr true))
-
 (defn- tcp-uri-text
   [host scheme]
   (let [ss (sut/inet-socket "127.0.0.1" 0)]
@@ -238,9 +234,8 @@
                     (sut/close-connection! client)
                     (sut/close-connection! accepted)))))
 
-            (when bind-refuses-existing-path?
-              (testing "where binding refuses an existing path, the path of a listener in use cannot be bound again"
-                (is (th/thrown-with? (constantly true) (sut/unix-server-socket path)))))
+            (testing "the path of a listener in use cannot be bound again"
+              (is (th/thrown-with? (constantly true) (sut/unix-server-socket path))))
 
             (testing "listener-closed? follows close-listener!"
               (is (not (sut/listener-closed? ss)))
@@ -256,18 +251,17 @@
         (finally
           (th/delete-recursively! dir))))))
 
-(when bind-refuses-existing-path?
-  (deftest unix-socket-stale-file-test
-    (when sut/unix-domain-flavor
-      (let [dir (th/make-temp-dir "nrepl-sock-")
-            path (th/path-join dir "stale")]
-        (try
-          (spit path "left behind")
-          (testing "where binding refuses an existing path, a file already at the path blocks the bind and is left alone"
-            (is (th/thrown-with? (constantly true) (sut/unix-server-socket path)))
-            (is (= "left behind" (slurp path))))
-          (finally
-            (th/delete-recursively! dir)))))))
+(deftest unix-socket-stale-file-test
+  (when sut/unix-domain-flavor
+    (let [dir (th/make-temp-dir "nrepl-sock-")
+          path (th/path-join dir "stale")]
+      (try
+        (spit path "left behind")
+        (testing "a file already at the path blocks the bind and is left alone"
+          (is (th/thrown-with? (constantly true) (sut/unix-server-socket path)))
+          (is (= "left behind" (slurp path))))
+        (finally
+          (th/delete-recursively! dir))))))
 
 (deftest unix-socket-connect-failure-test
   (when sut/unix-domain-flavor
