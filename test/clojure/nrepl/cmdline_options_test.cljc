@@ -25,3 +25,17 @@
 (deftest reexports
   (is (= (options/help) (cmd/help)))
   (is (identical? options/exit cmd/exit)))
+
+(defn- new-string-writer []
+  #?(:clj (java.io.StringWriter.)
+     :cljr (System.IO.StringWriter.)))
+
+(deftest missing-required-middleware-dies-with-a-message
+  (let [err (new-string-writer)
+        e (binding [*err* err]
+            (try (options/server-opts {:middleware ['nonexistent.ns/required]})
+                 (catch clojure.lang.ExceptionInfo e e)))]
+    (is (= {:nrepl/kind :nrepl.cmdline/exit :nrepl.cmdline/status 2}
+           (ex-data e)))
+    (is (= "nREPL middleware: unable to resolve nonexistent.ns/required\n"
+           (str err)))))

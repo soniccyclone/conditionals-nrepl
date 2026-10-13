@@ -144,7 +144,7 @@
   (try (require-and-resolve :middleware sym)
        (catch #?(:clj java.io.FileNotFoundException :cljr System.IO.FileNotFoundException) _
          (when-not (:optional (meta sym))
-           (die (format "nREPL %s: unable to resolve %s\n" (name key) sym))))))
+           (die (format "nREPL middleware: unable to resolve %s\n" sym))))))
 
 (defn- expand-list-of-mware
   [var]
