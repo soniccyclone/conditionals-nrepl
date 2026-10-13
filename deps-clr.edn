@@ -33,4 +33,5 @@
                                      nrepl.util.lookup-test
                                      nrepl.middleware.completion-test
                                      nrepl.middleware.lookup-test
+                                     nrepl.middleware.load-file-test
                                      nrepl.describe-test]}}}}

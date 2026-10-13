@@ -806,13 +806,20 @@
                                            (.Join curr-t 5000)
                                            (not (.IsAlive curr-t))))))))))
 
+(def ^:private blocked-evals-gate (atom nil))
+
 (def-repl-test blocked-ephemeral-evals-do-not-starve-handling
-  (dotimes [_ 32]
-    (message client {:op "eval" :code (str "(" sleep-fn " 60000)")}))
-  (testing "a session eval is still answered"
-    (is+ [2] (repl-values timeout-session "(+ 1 1)")))
-  (testing "a session-less eval is still answered"
-    (is+ [2] (repl-values timeout-client "(+ 1 1)"))))
+  (reset! blocked-evals-gate (promise))
+  (let [blocked (doall (for [_ (range 32)]
+                         (message client {:op "eval"
+                                          :code "(deref (deref @#'nrepl.core-test/blocked-evals-gate))"})))]
+    (testing "a session eval is still answered"
+      (is+ [2] (repl-values timeout-session "(+ 1 1)")))
+    (testing "a session-less eval is still answered"
+      (is+ [2] (repl-values timeout-client "(+ 1 1)")))
+    (deliver @blocked-evals-gate true)
+    (doseq [responses blocked]
+      (dorun responses))))
 
 (def-repl-test ensure-transport-closeable
   (is (= [5] (repl-values session "5")))

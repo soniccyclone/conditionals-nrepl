@@ -3,9 +3,8 @@
   (:require
    [clojure.test :refer :all]
    [nrepl.core :as nrepl]
-   [nrepl.core-test :refer [def-repl-test repl-server-fixture project-base-dir]])
-  (:import
-   (java.io File)))
+   [nrepl.core-test :refer [def-repl-test repl-server-fixture]]
+   [nrepl.test-helpers :as th]))
 
 (use-fixtures :each repl-server-fixture)
 
@@ -36,7 +35,7 @@
   (dorun
    (nrepl/message timeout-session
                   {:op "load-file"
-                   :file (slurp (File. project-base-dir "load-file-test/nrepl/load_file_sample.clj"))
+                   :file (slurp (th/project-file "load-file-test/nrepl/load_file_sample.clj"))
                    :file-path "nrepl/load_file_sample.clj"
                    :file-name "load_file_sample.clj"}))
   (is (= [{:file "nrepl/load_file_sample.clj" :line 5}]
@@ -100,3 +99,81 @@
       (is (not (contains? resp :ex))))
     (testing "comments-only file produces no value"
       (is (not (contains? resp :value))))))
+
+(def-repl-test load-file-lines-of-later-forms
+  (dorun
+   (nrepl/message session
+                  {:op "load-file"
+                   :file "(def first-form 1)\n\n(def second-form\n  2)\n(def third-form 3)"
+                   :file-path "path/from/source/root.clj"
+                   :file-name "root.clj"}))
+  (is (= [[{:file "path/from/source/root.clj" :line 1}
+           {:file "path/from/source/root.clj" :line 3}
+           {:file "path/from/source/root.clj" :line 5}]]
+         (repl-values session
+                      (nrepl/code
+                       (mapv #(select-keys (meta %) [:file :line])
+                             [#'first-form #'second-form #'third-form]))))))
+
+(def-repl-test load-file-reader-conditionals
+  (let [resp (nrepl/combine-responses
+              (nrepl/message session
+                             {:op "load-file"
+                              :file (str "(def shared-var #?(:clj :jvm :cljr :clr))\n"
+                                         "#?(:cljr (def cljr-only-var (str (System.Math/Abs -3))))\n"
+                                         "#?(:clj (def clj-only-var (str (Math/abs -3))))")
+                              :file-path "path/from/source/root.cljc"
+                              :file-name "root.cljc"}))]
+    (is (not (contains? resp :ex)))
+    (is (= [[#?(:clj :jvm :cljr :clr)
+             #?(:clj nil :cljr "3")
+             #?(:clj "3" :cljr nil)]]
+           (repl-values session
+                        (nrepl/code
+                         [shared-var
+                          (some-> (ns-resolve *ns* 'cljr-only-var) deref)
+                          (some-> (ns-resolve *ns* 'clj-only-var) deref)]))))))
+
+(def-repl-test load-file-compile-error
+  (let [resp (nrepl/combine-responses
+              (nrepl/message session
+                             {:op "load-file"
+                              :file "(def before-error 1)\n(defn bad [] (no-such-fn-xyz 1))\n(def after-error 2)"
+                              :file-path "path/from/source/root.clj"
+                              :file-name "root.clj"}))]
+    (is (contains? (set (map keyword (:status resp))) :eval-error))
+    (is (re-find #?(:clj #"^class clojure\.lang\.Compiler\$CompilerException$"
+                    :cljr #"^clojure\.lang\.Compiler\+CompilerException$")
+                 (:ex resp)))
+    (is (= [[1 nil]]
+           (repl-values session
+                        (nrepl/code
+                         [(some-> (ns-resolve *ns* 'before-error) deref)
+                          (some-> (ns-resolve *ns* 'after-error) deref)]))))))
+
+(def-repl-test load-file-bindings-do-not-leak-between-loads
+  (let [source (fn [suffix]
+                 (str "(defn nested" suffix " [a]\n"
+                      "  (let [b (inc a)]\n"
+                      "    (loop [i 0 acc b]\n"
+                      "      (if (< i 3)\n"
+                      "        (recur (inc i) (+ acc i))\n"
+                      "        (fn [] (let [c (* 2 acc)] [a b c i acc]))))))\n"
+                      "(def result" suffix " ((nested" suffix " 1)))\n"
+                      "result" suffix))]
+    (doseq [suffix ["-one" "-two"]]
+      (let [resp (nrepl/combine-responses
+                  (nrepl/message session
+                                 {:op "load-file"
+                                  :file (source suffix)
+                                  :file-path "path/from/source/root.clj"
+                                  :file-name "root.clj"}))]
+        (is (not (contains? resp :ex)))
+        (is (= ["[1 2 10 3 5]"] (:value resp)))))
+    (is (= [[[1 2 10 3 5] [1 2 10 3 5]]]
+           (repl-values session (nrepl/code [result-one result-two]))))
+    (is (= [[7 2]]
+           (repl-values session
+                        (nrepl/code
+                         (let [x 7]
+                           (loop [i 0] (if (< i 2) (recur (inc i)) [x i])))))))))
