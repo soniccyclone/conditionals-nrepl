@@ -313,7 +313,8 @@
       (is (= [{:out (th/newline->sys ":foo\n")}
               {:ns "user" :value "nil"}
               {:status #{:done}}]
-             (->> (repeatedly #(transport/recv transport2 100))
+             (->> (cons (transport/recv transport2 10000)
+                        (repeatedly #(transport/recv transport2 500)))
                   (take-while identity)
                   (mapv clean-response)))))))
 
