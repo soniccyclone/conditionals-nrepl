@@ -1,0 +1,52 @@
+name: ClojureCLR tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Install ClojureCLR and cljr
+      run: |
+        dotnet tool install --global Clojure.Main --version 1.12.6
+        dotnet tool install --global Clojure.Cljr --version 0.1.0-beta1
+
+    - name: Put the dotnet tools on PATH
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          tools="$(cygpath -w "$HOME/.dotnet/tools")"
+        else
+          tools="$HOME/.dotnet/tools"
+        fi
+        echo "$tools" >> "$GITHUB_PATH"
+
+    - name: Cache git dependencies
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.gitlibs
+          .cpcache
+        key: clr-${{ runner.os }}-${{ hashFiles('deps-clr.edn') }}
+        restore-keys: |
+          clr-${{ runner.os }}-
+
+    - name: Fetch dependencies
+      run: cljr -P -X:test
+
+    - name: Run the tests
+      run: cljr -X:test

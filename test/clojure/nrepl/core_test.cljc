@@ -1,6 +1,6 @@
 (ns nrepl.core-test
   (:require
-   [clojure.java.io :as io]
+   #?(:clj [clojure.java.io :as io])
    [clojure.main]
    [clojure.set :as set]
    [clojure.spec.alpha]
@@ -26,27 +26,58 @@
    [nrepl.misc :refer [uuid]]
    [nrepl.server :as server]
    [nrepl.test-helpers :as th :refer [is+ win?]]
-   [nrepl.util.classloader]
+   #?(:clj [nrepl.util.classloader])
    [nrepl.util.threading :as threading]
    [nrepl.transport :as transport])
   (:import
-   (java.io File Writer)
-   java.net.SocketException
+   #?(:clj (java.io File Writer))
    (nrepl.server Server)))
 
 (require 'nrepl.spec) ;; Load for side effects (register specs).
 
 (deftest version-sanity-check
-  (is (let [v (System/getenv "CLOJURE_VERSION")]
+  (is (let [v #?(:clj (System/getenv "CLOJURE_VERSION")
+                 :cljr (Environment/GetEnvironmentVariable "CLOJURE_VERSION"))]
         (println "Running on Clojure" (clojure-version) ", expected:" v)
-        (or (nil? v) (.startsWith ^String (clojure-version) v)))))
+        (or (nil? v) (#?(:clj .startsWith :cljr .StartsWith) ^String (clojure-version) v)))))
 
 (def transport-fn->protocol
   "Add your transport-fn var here so it can be tested"
   {#'transport/bencode "nrepl"
    #'transport/edn "nrepl+edn"})
 
-(def ^File project-base-dir (File. (System/getProperty "nrepl.basedir" ".")))
+#?(:clj (def ^File project-base-dir (File. (System/getProperty "nrepl.basedir" ".")))
+   :cljr (def project-base-dir Environment/CurrentDirectory))
+
+(def ^:private illegal-argument-class
+  #?(:clj "java.lang.IllegalArgumentException"
+     :cljr "System.ArgumentException"))
+
+(def ^:private arithmetic-class
+  #?(:clj "java.lang.ArithmeticException"
+     :cljr "System.ArithmeticException"))
+
+(def ^:private interrupted-class
+  #?(:clj "java.lang.InterruptedException"
+     :cljr "System.Threading.ThreadInterruptedException"))
+
+(defn- ex-string
+  "What the `:ex` and `:root-ex` keys of an eval error carry for the exception
+  class named CLASS-NAME."
+  [class-name]
+  #?(:clj (str "class " class-name)
+     :cljr class-name))
+
+(def ^:private sleep-fn
+  #?(:clj "Thread/sleep"
+     :cljr "System.Threading.Thread/Sleep"))
+
+(def ^:private thread-info-code
+  #?(:clj "[(.getName (Thread/currentThread)) (.isDaemon (Thread/currentThread))]"
+     :cljr "[(.Name System.Threading.Thread/CurrentThread) (.IsBackground System.Threading.Thread/CurrentThread)]"))
+
+(defn- simple-class-name [class-name]
+  (re-find #"[^.]+$" class-name))
 
 (def ^:dynamic ^nrepl.server.Server  *server* nil)
 (def ^:dynamic *transport-fn* nil)
@@ -93,7 +124,7 @@
                transport# (connect :port (:port *server*)
                                    :transport-fn *transport-fn*)]
      (let [~'transport transport#
-           ~'client (client transport# Long/MAX_VALUE)
+           ~'client (client transport# threading/infinite-ms)
            ~'session (closeable-session ~'client)
            ~'timeout-client (client transport# 1000)
            ~'timeout-session (closeable-session ~'client ~'timeout-client)
@@ -351,7 +382,7 @@
                                                 ::middleware.print/stream? 1
                                                 ::middleware.print/buffer-size 100000})
                               (map clean-response))
-          _ (Thread/sleep 300)
+          _ (th/sleep 300)
           interrupt-responses (->> (message session {:op "interrupt"})
                                    (mapv clean-response))]
       ;; check the interrupt succeeded first; otherwise eval-responses will not terminate
@@ -466,10 +497,12 @@
     (let [resp (message session {:op "eval" :code (code (do
                                                           (def halted? true)
                                                           halted?
-                                                          (try (Thread/sleep 30000)
+                                                          (try #?(:clj (Thread/sleep 30000)
+                                                                  :cljr (System.Threading.Thread/Sleep 30000))
                                                                (def halted? false)
-                                                               (catch InterruptedException _))))})]
-      (Thread/sleep 100)
+                                                               (catch #?(:clj InterruptedException
+                                                                         :cljr System.Threading.ThreadInterruptedException) _))))})]
+      (th/sleep 100)
       (is+ {:status #{:done :error :interrupt-id-mismatch}}
            (clean-response (first (message session {:op "interrupt" :interrupt-id "foo"}))))
       (is+ {:status #{:done}} (-> session (message {:op "interrupt"}) first clean-response))
@@ -483,42 +516,44 @@
           responses (session' {:op "eval"
                                :code (code
                                       (do
-                                        (Thread/sleep 10000)
+                                        #?(:clj (Thread/sleep 10000)
+                                           :cljr (System.Threading.Thread/Sleep 10000))
                                         "Done"))})]
-      (Thread/sleep 100)
+      (th/sleep 100)
       (session' {:op "interrupt"})
-      (Thread/sleep 200) ;; Let interrupt go through and generate an exception
+      (th/sleep 200) ;; Let interrupt go through and generate an exception
       (session' {:op "close"})
       ;; Can't rely on order, thus `mc/embeds`.
       (is+ (mc/embeds
             [;; response to interrupt msg
              {:status #{:done :interrupted}}
              ;; InterruptedException raised during sleep
-             {:ex "class java.lang.InterruptedException"
-              :root-ex "class java.lang.InterruptedException",
+             {:ex (ex-string interrupted-class)
+              :root-ex (ex-string interrupted-class)
               :status #{:eval-error}}
              ;; Response to `close`
              {:status #{:done :session-closed}}])
            (mapv clean-response responses))))
-  (testing "interruptible code"
-    (let [session' (nrepl/client-session client)
-          responses (session' {:op "eval"
-                               :code (code
-                                      (#(if (.isInterrupted (Thread/currentThread))
-                                          "Clean stop!"
-                                          (recur))))})]
-      (Thread/sleep 100)
-      (session' {:op "interrupt"})
-      (Thread/sleep 200) ;; Let interrupt go through and generate an exception
-      (session' {:op "close"})
-      (is+ (mc/embeds
-            [;; response to interrupt msg
-             {:status #{:done :interrupted}}
-             ;; Lagging return value produced after interruption
-             {:value "\"Clean stop!\""}
-             ;; Response to `close`
-             {:status #{:done :session-closed}}])
-           (mapv clean-response responses)))))
+  #?(:clj
+     (testing "interruptible code"
+       (let [session' (nrepl/client-session client)
+             responses (session' {:op "eval"
+                                  :code (code
+                                         (#(if (.isInterrupted (Thread/currentThread))
+                                             "Clean stop!"
+                                             (recur))))})]
+         (th/sleep 100)
+         (session' {:op "interrupt"})
+         (th/sleep 200) ;; Let interrupt go through and generate an exception
+         (session' {:op "close"})
+         (is+ (mc/embeds
+               [;; response to interrupt msg
+                {:status #{:done :interrupted}}
+                ;; Lagging return value produced after interruption
+                {:value "\"Clean stop!\""}
+                ;; Response to `close`
+                {:status #{:done :session-closed}}])
+              (mapv clean-response responses))))))
 
 (when-not win?
   (def-repl-test non-interruptible-stop-thread
@@ -527,21 +562,23 @@
         (let [resp (message session {:op "eval"
                                      :code (code
                                             (do (def vol (volatile! 0))
-                                                (def curr-t (Thread/currentThread))
+                                                (def curr-t #?(:clj (Thread/currentThread)
+                                                               :cljr System.Threading.Thread/CurrentThread))
                                                 ;; This never stops on its own.
                                                 (while (vswap! vol inc))))})]
-          (Thread/sleep 1000)
+          (th/sleep 1000)
           (is+ {:status #{:done}}
                (-> (message session {:op "interrupt"})
                    first
                    clean-response))
           ;; Wait for CIDER forceful interrupt to trigger.
-          (Thread/sleep (+ 500 1000))
+          (th/sleep (+ 500 1000))
           ;; Verify that volatile is not changed anymore.
           (let [v (repl-values session "@vol")]
-            (Thread/sleep 1000)
+            (th/sleep 1000)
             (is (= v (repl-values session "@vol")))
-            (is (= ["TERMINATED"] (repl-values session "(str (.getState curr-t))")))))))))
+            #?(:clj (is (= ["TERMINATED"] (repl-values session "(str (.getState curr-t))")))
+               :cljr (is (= [true] (repl-values session "(not (.IsAlive curr-t))"))))))))))
 
 ;; NREPL-66: ensure that bindings of implementation vars aren't captured by user sessions
 ;; (https://github.com/clojure-emacs/cider/issues/785)
@@ -553,7 +590,7 @@
     (is (= (th/newline->sys ":foo\n") out1 out2))))
 
 (def-repl-test read-timeout
-  (is (nil? (repl-values timeout-session "(Thread/sleep 1100) :ok")))
+  (is (nil? (repl-values timeout-session (str "(" sleep-fn " 1100) :ok"))))
   ;; just getting the values off of the wire so the server side doesn't
   ;; toss a spurious stack trace when the client disconnects
   (is (= [nil :ok] (->> (repeatedly #(transport/recv transport 500))
@@ -563,36 +600,37 @@
 (def-repl-test concurrent-message-handling
   (testing "multiple messages can be handled on the same connection concurrently"
     (let [sessions (vec (repeatedly 3 #(client-session client)))
-          start-time (System/currentTimeMillis)
+          start-time (th/now-ms)
           elapsed-times (mapv (fn [session eval-duration]
-                                (let [expr (pr-str `(Thread/sleep ~eval-duration))
+                                (let [expr (pr-str #?(:clj `(Thread/sleep ~eval-duration)
+                                                      :cljr `(System.Threading.Thread/Sleep ~eval-duration)))
                                       responses (message session {:op "eval" :code expr})]
                                   (future
                                     (is (= [nil] (response-values responses)))
-                                    (- (System/currentTimeMillis) start-time))))
+                                    (- (th/now-ms) start-time))))
                               sessions
                               [1000 500 0])]
       (is (apply > (map deref elapsed-times))))))
 
 (def-repl-test thread-naming-test
   (testing "a persistent session evaluates on a daemon thread named after the session"
-    (let [responses (vec (repl-eval session "[(.getName (Thread/currentThread)) (.isDaemon (Thread/currentThread))]"))
+    (let [responses (vec (repl-eval session thread-info-code))
           sid (:session (first responses))]
       (is+ [[(str "nREPL-session-" sid) true]]
            (response-values responses))))
   (testing "an ephemeral session evaluates on a daemon thread of the ephemeral executor"
-    (let [[thread-name daemon?] (first (repl-values client "[(.getName (Thread/currentThread)) (.isDaemon (Thread/currentThread))]"))]
+    (let [[thread-name daemon?] (first (repl-values client thread-info-code))]
       (is (re-matches #"nREPL-ephemeral-session-\d+" thread-name))
       (is (true? daemon?))))
   (testing "the per-connection loop and the message handlers run on their own executors"
     (let [greeted (promise)
           handled (promise)
-          handler (fn [_msg] (deliver handled (.getName (Thread/currentThread))))]
+          handler (fn [_msg] (deliver handled (th/current-thread-name)))]
       (with-open [^Server server (server/start-server
                                   :transport-fn *transport-fn*
                                   :handler handler
                                   :greeting-fn (fn [_transport]
-                                                 (deliver greeted (.getName (Thread/currentThread)))))
+                                                 (deliver greeted (th/current-thread-name))))
                   conn (connect :port (:port server) :transport-fn *transport-fn*)]
         (is (re-matches #"nREPL-connection-\d+" (deref greeted 5000 "")))
         (transport/send conn {:op "eval" :code "1"})
@@ -623,7 +661,7 @@
   [client transport code]
   (let [sid (new-session client)]
     (transport/send transport {:op "eval" :id "spin" :session sid :code code})
-    (Thread/sleep 300)
+    (th/sleep 300)
     (transport/send transport {:op "interrupt" :id "interrupt" :session sid})
     {:session sid
      :messages (drain transport 2500)}))
@@ -633,13 +671,13 @@
     (with-redefs [threading/force-stop-delay-ms 500]
       (message timeout-session {:op "eval"
                                 :code (code (while true))})
-      (Thread/sleep 300)
+      (th/sleep 300)
       (is+ {:status #{:done}}
            (-> (message timeout-session {:op "interrupt"})
                first
                clean-response))
       (repl-values timeout-session "(def t2 (Thread/currentThread))")
-      (Thread/sleep 1500)
+      (th/sleep 1500)
       (is+ [true] (repl-values timeout-session "(identical? t2 (Thread/currentThread))"))))
 
   (def-repl-test forced-stop-sends-no-eval-error
@@ -661,27 +699,29 @@
                                       (def p p)
                                       (try (loop [] (recur))
                                            (finally (deliver p :ran)))))})
-      (Thread/sleep 300)
+      (th/sleep 300)
       (is+ {:status #{:done}}
            (-> (message session {:op "interrupt"})
                first
                clean-response))
-      (Thread/sleep (+ 500 1000))
+      (th/sleep (+ 500 1000))
       (is+ [true] (repl-values session "(realized? p)"))))
 
   (def-repl-test interrupt-swallowed-by-user-catch-is-force-stopped
     (with-redefs [threading/force-stop-delay-ms 500]
       (message session {:op "eval"
                         :code (code (do (def curr-t (Thread/currentThread))
-                                        (try (Thread/sleep 30000)
-                                             (catch InterruptedException _
+                                        (try #?(:clj (Thread/sleep 30000)
+                                                :cljr (System.Threading.Thread/Sleep 30000))
+                                             (catch #?(:clj InterruptedException
+                                                       :cljr System.Threading.ThreadInterruptedException) _
                                                (loop [] (recur))))))})
-      (Thread/sleep 300)
+      (th/sleep 300)
       (is+ {:status #{:done}}
            (-> (message session {:op "interrupt"})
                first
                clean-response))
-      (Thread/sleep (+ 500 1000))
+      (th/sleep (+ 500 1000))
       (is+ ["TERMINATED"] (repl-values session "(str (.getState curr-t))"))))
 
   (def-repl-test force-interrupt-false-keeps-the-thread
@@ -693,12 +733,12 @@
                                         (def curr-t (Thread/currentThread))
                                         (while (not @stop?)
                                           (vswap! vol inc))))})
-      (Thread/sleep 300)
+      (th/sleep 300)
       (is+ {:status #{:done}}
            (-> (message session {:op "interrupt"})
                first
                clean-response))
-      (Thread/sleep (+ 300 1000))
+      (th/sleep (+ 300 1000))
       (is+ ["RUNNABLE"] (repl-values session "(str (.getState curr-t))"))
       (is+ ["TERMINATED"] (repl-values session
                                        (code (do (vreset! stop? true)
@@ -707,7 +747,7 @@
 
 (def-repl-test blocked-ephemeral-evals-do-not-starve-handling
   (dotimes [_ 32]
-    (message client {:op "eval" :code "(Thread/sleep 60000)"}))
+    (message client {:op "eval" :code (str "(" sleep-fn " 60000)")}))
   (testing "a session eval is still answered"
     (is+ [2] (repl-values timeout-session "(+ 1 1)")))
   (testing "a session-less eval is still answered"
@@ -715,22 +755,22 @@
 
 (def-repl-test ensure-transport-closeable
   (is (= [5] (repl-values session "5")))
-  (is (instance? java.io.Closeable transport))
+  (is (instance? #?(:clj java.io.Closeable :cljr System.IDisposable) transport))
   (.close transport)
-  (is (thrown? java.net.SocketException (repl-values session "5"))))
+  (is (th/thrown-with? th/disconnected? (repl-values session "5"))))
 
 (def-repl-test ensure-server-closeable
   (.close *server*)
-  (Thread/sleep 100)
-  (is (thrown? java.net.ConnectException (connect :port (:port *server*)))))
+  (th/sleep 100)
+  (is (th/thrown-with? th/connection-refused? (connect :port (:port *server*)))))
 
 (defn- disconnection-exception?
   [e]
   ;; thrown? should check for the root cause! The JDK reports a peer that went
   ;; away either as a reset or, once the transport notices the EOF, as the
   ;; transport's own "lost its connection" message.
-  (let [^Throwable cause (root-cause e)]
-    (and (instance? SocketException cause)
+  (let [cause (root-cause e)]
+    (and (th/disconnected? cause)
          (re-find #"(?i)(lost.*connection|socket closed|connection reset)" (ex-message cause)))))
 
 (deftest transports-fail-on-disconnects
@@ -742,30 +782,30 @@
       (transport/send transport {:op "eval" :code "(+ 1 1)"})
 
       (let [reader (future (while true (transport/recv transport)))]
-        (Thread/sleep 100)
+        (th/sleep 100)
         (.close server)
-        (Thread/sleep 100)
+        (th/sleep 100)
         (try
           (deref reader 1000 :timeout)
           (assert false "A reader started prior to the server closing should throw an error...")
-          (catch Throwable e
+          (catch #?(:clj Throwable :cljr Exception) e
             (is (disconnection-exception? e)))))
 
-      (is (thrown? SocketException (transport/recv transport)))
+      (is (th/thrown-with? th/disconnected? (transport/recv transport)))
       ;; The next `Thread/sleep` is needed or the test would be fleaky
       ;; for some transports that don't throw an exception the first time
       ;; a message is sent after the server is closed.
       (try
         (transport/send transport {:op "eval" :code "(+ 5 1)"})
-        (catch Throwable t))
-      (Thread/sleep 100)
-      (is (thrown? SocketException (transport/send transport {:op "eval" :code "(+ 5 1)"}))))))
+        (catch #?(:clj Throwable :cljr Exception) t))
+      (th/sleep 100)
+      (is (th/thrown-with? th/disconnected? (transport/send transport {:op "eval" :code "(+ 5 1)"}))))))
 
 (deftest server-starts-with-minimal-configuration
   (testing "Ensure server starts with minimal configuration"
     (let [server (server/start-server)
           transport (connect :port (:port server))
-          client (client transport Long/MAX_VALUE)]
+          client (client transport threading/infinite-ms)]
       (is+ {:value ["3"]}
            (-> (message client {:op "eval" :code "(- 4 1)"})
                combine-responses)))))
@@ -774,22 +814,22 @@
   (testing "Ensure that clients fail ASAP when the server they're connected to goes down."
     (let [resp (repl-eval client "1 2 3 4 5 6 7 8 9 10")]
       (is+ {:value "1"} (first resp))
-      (Thread/sleep 1000)
+      (th/sleep 1000)
       (.close *server*)
-      (Thread/sleep 1000)
+      (th/sleep 1000)
       (try
         ;; these responses were on the wire before the remote transport was closed
         (is (> 20 (count resp)))
         (transport/recv transport)
         (assert false "reads after the server is closed should fail")
-        (catch Throwable t
+        (catch #?(:clj Throwable :cljr Exception) t
           (is (disconnection-exception? t)))))
 
     ;; TODO: as noted in transports-fail-on-disconnects, *sometimes* two sends are needed
     ;; to trigger an exception on send to an unavailable server
-    (try (repl-eval session "(+ 1 1)") (catch Throwable _))
-    (Thread/sleep 100)
-    (is (thrown? SocketException (repl-eval session "(+ 1 1)")))))
+    (try (repl-eval session "(+ 1 1)") (catch #?(:clj Throwable :cljr Exception) _))
+    (th/sleep 100)
+    (is (th/thrown-with? th/disconnected? (repl-eval session "(+ 1 1)")))))
 
 (def-repl-test request-*in*
   (let [responses (repl-eval session "(read)")]
@@ -871,22 +911,22 @@
               conn (url-connect (str (transport-fn->protocol *transport-fn*)
                                      "://127.0.0.1:"
                                      (:port *server*)))]
-    (let [cli (nrepl/client conn Long/MAX_VALUE)]
+    (let [cli (nrepl/client conn threading/infinite-ms)]
       (is (= 2 (th/eval-value1 cli '(+ 1 1)))))))
 
 (def-repl-test test-url-connect-uri-object
   (with-open [^nrepl.transport.FnTransport
-              conn (url-connect (java.net.URI. (str (transport-fn->protocol *transport-fn*)
-                                                    "://127.0.0.1:"
-                                                    (:port *server*))))]
-    (let [cli (nrepl/client conn Long/MAX_VALUE)]
+              conn (url-connect (#?(:clj java.net.URI. :cljr System.Uri.) (str (transport-fn->protocol *transport-fn*)
+                                                                               "://127.0.0.1:"
+                                                                               (:port *server*))))]
+    (let [cli (nrepl/client conn threading/infinite-ms)]
       (is (= 2 (th/eval-value1 cli '(+ 1 1)))))))
 
 (deftest url-connect-errors
   (testing "an unknown scheme is rejected with the scheme and url in the message"
     (let [e (try (url-connect "gopher://example.org:70")
-                 (catch IllegalArgumentException e e))]
-      (is (instance? IllegalArgumentException e))
+                 (catch #?(:clj IllegalArgumentException :cljr ArgumentException) e e))]
+      (is (instance? #?(:clj IllegalArgumentException :cljr ArgumentException) e))
       (is (= "No nREPL support known for scheme gopher, url gopher://example.org:70"
              (ex-message e)))))
   (testing "the scheme is matched case-insensitively"
@@ -902,8 +942,8 @@
 
 (deftest connect-requires-host-and-port-or-socket
   (let [e (try (connect :host "127.0.0.1")
-               (catch IllegalArgumentException e e))]
-    (is (instance? IllegalArgumentException e))
+               (catch #?(:clj IllegalArgumentException :cljr ArgumentException) e e))]
+    (is (instance? #?(:clj IllegalArgumentException :cljr ArgumentException) e))
     (is (= "A host plus port or a socket must be supplied to connect." (ex-message e)))))
 
 (deftest test-ack
@@ -917,7 +957,9 @@
 
 (def-repl-test agent-await
   (is+ [42] (repl-values session (code (let [a (agent nil)]
-                                         (send a (fn [_] (Thread/sleep 100) 42))
+                                         (send a (fn [_] #?(:clj (Thread/sleep 100)
+                                                            :cljr (System.Threading.Thread/Sleep 100))
+                                                   42))
                                          (await a)
                                          @a)))))
 
@@ -956,15 +998,15 @@
 
 (def-repl-test interrupt-load-file
   (let [resp (message session {:op "load-file"
-                               :file (slurp (File. project-base-dir "load-file-test/nrepl/load_file_sample2.clj"))
-                               :file-path "nrepl/load_file_sample2.clj"
-                               :file-name "load_file_sample2.clj"})]
-    (Thread/sleep 100)
+                               :file (slurp (th/project-file "load-file-test/nrepl/load_file_sample2.cljc"))
+                               :file-path "nrepl/load_file_sample2.cljc"
+                               :file-name "load_file_sample2.cljc"})]
+    (th/sleep 100)
     (is+ {:status #{:done}}
          (-> (message session {:op "interrupt"})
              first
              clean-response))
-    (Thread/sleep 500)
+    (th/sleep 500)
     (is+ {:status (mc/embeds #{:interrupted})}
          (-> resp
              combine-responses
@@ -1005,7 +1047,7 @@
              combine-responses))))
 
 (defn custom-repl-caught
-  [^Throwable t]
+  [#?(:clj ^Throwable t :cljr t)]
   (binding [*out* *err*]
     (println "foo" (type t))))
 
@@ -1013,10 +1055,10 @@
   (testing "bad symbol should fall back to default"
     (is+ [{::middleware.caught/error "Couldn't resolve var my.missing.ns/repl-caught"
            :status #{:nrepl.middleware.caught/error}}
-          {:err #"IllegalArgumentException"}
+          {:err (re-pattern (simple-class-name illegal-argument-class))}
           {:status #{:eval-error}
-           :ex "class java.lang.IllegalArgumentException"
-           :root-ex "class java.lang.IllegalArgumentException"}
+           :ex (ex-string illegal-argument-class)
+           :root-ex (ex-string illegal-argument-class)}
           {:status #{:done}}]
          (->> (message session {:op "eval"
                                 :code (code (first 1))
@@ -1024,10 +1066,10 @@
               (mapv clean-response))))
 
   (testing "custom symbol should be used"
-    (is+ [{:err (th/newline->sys "foo java.lang.IllegalArgumentException\n")}
+    (is+ [{:err (th/newline->sys (str "foo " illegal-argument-class "\n"))}
           {:status #{:eval-error}
-           :ex "class java.lang.IllegalArgumentException"
-           :root-ex "class java.lang.IllegalArgumentException"}
+           :ex (ex-string illegal-argument-class)
+           :root-ex (ex-string illegal-argument-class)}
           {:status #{:done}}]
          (->> (message session {:op "eval"
                                 :code (code (first 1))
@@ -1035,22 +1077,22 @@
               (mapv clean-response))))
 
   (testing "::print? option"
-    (is+ [{:err #"IllegalArgumentException"}
+    (is+ [{:err (re-pattern (simple-class-name illegal-argument-class))}
           {:status #{:eval-error}
-           :ex "class java.lang.IllegalArgumentException"
-           :root-ex "class java.lang.IllegalArgumentException"
-           ::middleware.caught/throwable #"IllegalArgumentException"}
+           :ex (ex-string illegal-argument-class)
+           :root-ex (ex-string illegal-argument-class)
+           ::middleware.caught/throwable (re-pattern (simple-class-name illegal-argument-class))}
           {:status #{:done}}]
          (->> (message session {:op "eval"
                                 :code (code (first 1))
                                 ::middleware.caught/print? 1})
               (mapv clean-response)))
 
-    (is+ [{:err (th/newline->sys "foo java.lang.IllegalArgumentException\n")}
+    (is+ [{:err (th/newline->sys (str "foo " illegal-argument-class "\n"))}
           {:status #{:eval-error}
-           :ex "class java.lang.IllegalArgumentException"
-           :root-ex "class java.lang.IllegalArgumentException"
-           ::middleware.caught/throwable #"IllegalArgumentException"}
+           :ex (ex-string illegal-argument-class)
+           :root-ex (ex-string illegal-argument-class)
+           ::middleware.caught/throwable (re-pattern (simple-class-name illegal-argument-class))}
           {:status #{:done}}]
          (->> (message session {:op "eval"
                                 :code (code (first 1))
@@ -1059,7 +1101,7 @@
               (mapv clean-response)))))
 
 (defn custom-session-repl-caught
-  [^Throwable t]
+  [#?(:clj ^Throwable t :cljr t)]
   (binding [*out* *err*]
     (println "bar" (ex-message t))))
 
@@ -1073,18 +1115,18 @@
 
     (is+ [{:err (th/newline->sys "bar Divide by zero\n")}
           {:status #{:eval-error}
-           :ex "class java.lang.ArithmeticException"
-           :root-ex "class java.lang.ArithmeticException"}
+           :ex (ex-string arithmetic-class)
+           :root-ex (ex-string arithmetic-class)}
           {:status #{:done}}]
          (->> (message session {:op "eval"
                                 :code (code (/ 1 0))})
               (mapv clean-response))))
 
   (testing "request can still override *caught-fn*"
-    (is+ [{:err (th/newline->sys "foo java.lang.ArithmeticException\n")}
+    (is+ [{:err (th/newline->sys (str "foo " arithmetic-class "\n"))}
           {:status #{:eval-error}
-           :ex "class java.lang.ArithmeticException"
-           :root-ex "class java.lang.ArithmeticException"}
+           :ex (ex-string arithmetic-class)
+           :root-ex (ex-string arithmetic-class)}
           {:status #{:done}}]
          (->> (message session {:op "eval"
                                 :code (code (/ 1 0))
@@ -1094,8 +1136,8 @@
   (testing "request can still provide ::print? option"
     (is+ [{:err #"Divide by zero"}
           {:status #{:eval-error}
-           :ex "class java.lang.ArithmeticException"
-           :root-ex "class java.lang.ArithmeticException"
+           :ex (ex-string arithmetic-class)
+           :root-ex (ex-string arithmetic-class)
            ::middleware.caught/throwable #"Divide by zero"}
           {:status #{:done}}]
          (->> (message session {:op "eval"
@@ -1103,10 +1145,10 @@
                                 ::middleware.caught/print? 1})
               (mapv clean-response)))
 
-    (is+ [{:err (th/newline->sys "foo java.lang.ArithmeticException\n")}
+    (is+ [{:err (th/newline->sys (str "foo " arithmetic-class "\n"))}
           {:status #{:eval-error}
-           :ex "class java.lang.ArithmeticException"
-           :root-ex "class java.lang.ArithmeticException"
+           :ex (ex-string arithmetic-class)
+           :root-ex (ex-string arithmetic-class)
            ::middleware.caught/throwable #"Divide by zero"}
           {:status #{:done}}]
          (->> (message session {:op "eval"
@@ -1120,82 +1162,89 @@
 ;; pomegranate (and other classpath modifying libs?) target to enable hotloading
 
 ;; This is from pomegranate
-(defn classloader-hierarchy
-  "Returns a seq of classloaders, with the tip of the hierarchy first.
-   Uses the current thread context ClassLoader as the tip ClassLoader
-   if one is not provided."
-  ([] (classloader-hierarchy (.. Thread currentThread getContextClassLoader)))
-  ([tip]
-   (->> tip
-        (iterate #(.getParent ^ClassLoader %))
-        (take-while boolean))))
+#?(:clj
+   (defn classloader-hierarchy
+     "Returns a seq of classloaders, with the tip of the hierarchy first.
+      Uses the current thread context ClassLoader as the tip ClassLoader
+      if one is not provided."
+     ([] (classloader-hierarchy (.. Thread currentThread getContextClassLoader)))
+     ([tip]
+      (->> tip
+           (iterate #(.getParent ^ClassLoader %))
+           (take-while boolean)))))
 
-(def captured-values-atom (atom {}))
+#?(:clj
+   (def captured-values-atom (atom {})))
 
-(defn capture-value [key value]
-  (swap! captured-values-atom assoc key value)
-  nil)
+#?(:clj
+   (defn capture-value [key value]
+     (swap! captured-values-atom assoc key value)
+     nil))
 
-(def-repl-test hotloading-common-classloader-test
-  (testing "Check if RT/baseLoader and ContexClassLoader have a common DCL ancestor"
-    (repl-values session (code (nrepl.core-test/capture-value
-                                "base-loader"
-                                (nrepl.util.classloader/find-topmost-dcl (clojure.lang.RT/baseLoader)))))
-    (repl-values session (code (nrepl.core-test/capture-value
-                                "ccl"
-                                (nrepl.util.classloader/find-topmost-dcl (.getContextClassLoader (Thread/currentThread))))))
-    (let [base-loader (@captured-values-atom "base-loader")
-          ccl (@captured-values-atom "ccl")]
-      (is base-loader)
-      (is (= base-loader ccl))))
-  (reset! captured-values-atom {}))
+#?(:clj
+   (def-repl-test hotloading-common-classloader-test
+     (testing "Check if RT/baseLoader and ContexClassLoader have a common DCL ancestor"
+       (repl-values session (code (nrepl.core-test/capture-value
+                                   "base-loader"
+                                   (nrepl.util.classloader/find-topmost-dcl (clojure.lang.RT/baseLoader)))))
+       (repl-values session (code (nrepl.core-test/capture-value
+                                   "ccl"
+                                   (nrepl.util.classloader/find-topmost-dcl (.getContextClassLoader (Thread/currentThread))))))
+       (let [base-loader (@captured-values-atom "base-loader")
+             ccl (@captured-values-atom "ccl")]
+         (is base-loader)
+         (is (= base-loader ccl))))
+     (reset! captured-values-atom {})))
 
-(def-repl-test classloader-chain-doesnt-grow-test
-  (testing "after doing regular evals, the classloader chain remains of the same length"
-    (let [[chain-length] (repl-values session (code (count
-                                                     (nrepl.core-test/classloader-hierarchy))))]
-      ;; Eval some things.
-      (dotimes [_ 10] (repl-values session (code (+ 1 2))))
-      (is (= chain-length
-             (first (repl-values session (code (count
-                                                (nrepl.core-test/classloader-hierarchy))))))))))
+#?(:clj
+   (def-repl-test classloader-chain-doesnt-grow-test
+     (testing "after doing regular evals, the classloader chain remains of the same length"
+       (let [[chain-length] (repl-values session (code (count
+                                                        (nrepl.core-test/classloader-hierarchy))))]
+         ;; Eval some things.
+         (dotimes [_ 10] (repl-values session (code (+ 1 2))))
+         (is (= chain-length
+                (first (repl-values session (code (count
+                                                   (nrepl.core-test/classloader-hierarchy)))))))))))
 
-(def-repl-test custom-context-classloader-is-not-overwritten
-  (testing "if user eval code has set the custom context classloader, then it persists"
-    (repl-values session
-                 (code
-                  (let [t (Thread/currentThread)
-                        new-cl (clojure.lang.DynamicClassLoader.
-                                (.getContextClassLoader t))]
-                    (.setContextClassLoader t new-cl)
-                    (nrepl.core-test/capture-value "new-cl" new-cl))))
-    (let [[good?] (repl-values session
-                               (code
-                                (contains? (set (#'nrepl.core-test/classloader-hierarchy))
-                                           (@nrepl.core-test/captured-values-atom "new-cl"))))]
-      (is good?)))
-  (reset! captured-values-atom {}))
+#?(:clj
+   (def-repl-test custom-context-classloader-is-not-overwritten
+     (testing "if user eval code has set the custom context classloader, then it persists"
+       (repl-values session
+                    (code
+                     (let [t (Thread/currentThread)
+                           new-cl (clojure.lang.DynamicClassLoader.
+                                   (.getContextClassLoader t))]
+                       (.setContextClassLoader t new-cl)
+                       (nrepl.core-test/capture-value "new-cl" new-cl))))
+       (let [[good?] (repl-values session
+                                  (code
+                                   (contains? (set (#'nrepl.core-test/classloader-hierarchy))
+                                              (@nrepl.core-test/captured-values-atom "new-cl"))))]
+         (is good?)))
+     (reset! captured-values-atom {})))
 
-(def-repl-test custom-context-classloader-is-used-for-loading
-  ;; Libraries like lambdaisland.classpath install their own classloader as the
-  ;; session thread's context classloader. Loading during eval has to resolve
-  ;; through it - binding Compiler/LOADER to a DynamicClassLoader ancestor
-  ;; instead silently bypasses it (see #464).
-  (testing "a custom context classloader ends up in the chain used for loading"
-    (repl-values session
-                 (code
-                  (let [t (Thread/currentThread)
-                        new-cl (clojure.lang.DynamicClassLoader.
-                                (.getContextClassLoader t))]
-                    (.setContextClassLoader t new-cl)
-                    (nrepl.core-test/capture-value "custom-cl" new-cl))))
-    (let [[in-chain?] (repl-values session
-                                   (code
-                                    (contains? (set (nrepl.core-test/classloader-hierarchy
-                                                     (clojure.lang.RT/baseLoader)))
-                                               (@nrepl.core-test/captured-values-atom "custom-cl"))))]
-      (is in-chain?)))
-  (reset! captured-values-atom {}))
+#?(:clj
+   (def-repl-test custom-context-classloader-is-used-for-loading
+     ;; Libraries like lambdaisland.classpath install their own classloader as the
+     ;; session thread's context classloader. Loading during eval has to resolve
+     ;; through it - binding Compiler/LOADER to a DynamicClassLoader ancestor
+     ;; instead silently bypasses it (see #464).
+     (testing "a custom context classloader ends up in the chain used for loading"
+       (repl-values session
+                    (code
+                     (let [t (Thread/currentThread)
+                           new-cl (clojure.lang.DynamicClassLoader.
+                                   (.getContextClassLoader t))]
+                       (.setContextClassLoader t new-cl)
+                       (nrepl.core-test/capture-value "custom-cl" new-cl))))
+       (let [[in-chain?] (repl-values session
+                                      (code
+                                       (contains? (set (nrepl.core-test/classloader-hierarchy
+                                                        (clojure.lang.RT/baseLoader)))
+                                                  (@nrepl.core-test/captured-values-atom "custom-cl"))))]
+         (is in-chain?)))
+     (reset! captured-values-atom {})))
 
 (def-repl-test sanity-tests
   (testing "eval"
