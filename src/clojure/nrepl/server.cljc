@@ -55,46 +55,67 @@
   [x]
   (safe-close-with io/close! x))
 
+(defn- open-transport
+  [transport-fn sock]
+  (try
+    (transport-fn sock)
+    (catch #?(:clj Throwable :cljr Exception) t
+      (log t "Failed to create a transport for an accepted connection")
+      (safe-close sock)
+      nil)))
+
+(defn- serve-connection
+  [{:keys [server-socket open-transports transport greeting handler]} sock]
+  (if (socket/listener-closed? server-socket)
+    (safe-close sock)
+    (when-let [transport (open-transport transport sock)]
+      (swap! open-transports conj transport)
+      (threading/run-with @threading/connection-executor
+        (log-exceptions
+         (try
+           (when greeting (greeting transport))
+           (handle handler transport)
+           (catch #?(:clj Throwable :cljr Exception) t
+             (when-not (socket/disconnected? t)
+               (throw t)))
+           (finally
+             (swap! open-transports disj transport)
+             (safe-close transport))))))))
+
 (defn- accept-connection-loop
-  [{:keys [server-socket open-transports transport greeting handler]}
-   consume-exception]
-  (loop []
-    (when-let [sock (try
-                      (socket/accept server-socket)
-                      (catch #?(:clj Throwable :cljr Exception) t
-                        (consume-exception t)
-                        (if (tls/handshake-exception? t)
-                          :tls-exception
-                          (do
-                            (when-not (or (socket/closed-exception? t)
-                                          (socket/listener-closed? server-socket))
-                              (log t "Unexpected exception in server loop")
-                              (safe-close-with socket/close-listener! server-socket) ; is this a good idea?
-                              (log "Shutting down server abruptly"))
-                            nil))))]
-      ;; If socket was closed (hence `sock` was nil), the loop is stopped. If
-      ;; there was a TLS exception, e.g. bad client cert, skip the error but
-      ;; continue the loop.
-      (when-not (= sock :tls-exception)
-        (threading/run-with @threading/connection-executor
-          (log-exceptions
-           (let [transport (transport sock)]
-             (try
-               (swap! open-transports conj transport)
-               (when greeting (greeting transport))
-               (handle handler transport)
-               (catch #?(:clj Throwable :cljr Exception) t
-                 (when-not (socket/disconnected? t)
-                   (throw t)))
-               (finally
-                 (swap! open-transports disj transport)
-                 (safe-close transport)))))))
-      (recur))))
+  [{:keys [server-socket accept-loop-exited] :as server} consume-exception]
+  (try
+    (loop []
+      (when-let [sock (try
+                        (socket/accept server-socket)
+                        (catch #?(:clj Throwable :cljr Exception) t
+                          (consume-exception t)
+                          (if (tls/handshake-exception? t)
+                            :tls-exception
+                            (do
+                              (when-not (or (socket/closed-exception? t)
+                                            (socket/listener-closed? server-socket))
+                                (log t "Unexpected exception in server loop")
+                                (safe-close-with socket/close-listener! server-socket) ; is this a good idea?
+                                (log "Shutting down server abruptly"))
+                              nil))))]
+        ;; If socket was closed (hence `sock` was nil), the loop is stopped. If
+        ;; there was a TLS exception, e.g. bad client cert, skip the error but
+        ;; continue the loop.
+        (when-not (= sock :tls-exception)
+          (serve-connection server sock))
+        (recur)))
+    (finally
+      (deliver accept-loop-exited true))))
 
 (defn stop-server
-  "Stops a server started via `start-server`."
-  [{:keys [open-transports server-socket] :as server}]
+  "Stops a server started via `start-server`. Returns after the listener is
+  closed, the accept loop has exited, and every open connection is closed, so
+  no connection is served once it returns."
+  [{:keys [open-transports server-socket accept-loop-exited] :as server}]
   (socket/close-listener! server-socket)
+  (when accept-loop-exited
+    @accept-loop-exited)
   (swap! open-transports
          #(reduce
            (fn [s t]
@@ -165,7 +186,8 @@
   greeting  ;; A function called after a client connects but before the
             ;; handler. Called with the connection's corresponding
             ;; nrepl.transport/Transport object
-  handler]  ;; The message handler function to use for connected clients
+  handler   ;; The message handler function to use for connected clients
+  accept-loop-exited]
   #?@(:clj [java.io.Closeable
             (close [this] (stop-server this))]
       :cljr [System.IDisposable
@@ -229,7 +251,8 @@
                         (atom #{})
                         transport-fn
                         greeting-fn
-                        (or handler (default-handler)))]
+                        (or handler (default-handler))
+                        (promise))]
     (threading/run-with @threading/listen-executor
       (log-exceptions
        (accept-connection-loop server consume-exception)))

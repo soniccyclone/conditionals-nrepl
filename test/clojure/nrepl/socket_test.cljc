@@ -308,6 +308,61 @@
             (finally
               (th/delete-recursively! dir))))))))
 
+(deftest stop-server-serves-no-connection-accepted-during-close-test
+  (doseq [kind (cond-> [:tcp] sut/unix-domain-flavor (conj :unix))]
+    (testing (str "a connection accepted while the listener closes on a " (name kind) " server is closed, not served")
+      (let [dir (th/make-temp-dir "nrepl-sock-")
+            path (th/path-join dir "server")
+            real-accept sut/accept
+            real-close-listener! sut/close-listener!
+            first-accept? (atom :pending)
+            events (atom [])
+            record! (fn [event] (swap! events conj event))
+            accepted (promise)
+            listener-closed (promise)
+            stop-returned (promise)
+            transports-made (atom 0)
+            transport-fn (fn [sock]
+                           (swap! transports-made inc)
+                           (transport/bencode sock))]
+        (try
+          (with-redefs [sut/accept (fn [listener]
+                                     (if (compare-and-set! first-accept? :pending :taken)
+                                       (let [conn (real-accept listener)]
+                                         (record! :accepted)
+                                         (deliver accepted true)
+                                         @listener-closed
+                                         (deref stop-returned 500 nil)
+                                         conn)
+                                       (try
+                                         (real-accept listener)
+                                         (finally (record! :final-accept)))))
+                        sut/close-listener! (fn [listener]
+                                              (real-close-listener! listener)
+                                              (record! :listener-closed)
+                                              (deliver listener-closed true))]
+            (let [server (if (= :unix kind)
+                           (server/start-server :socket path :transport-fn transport-fn)
+                           (server/start-server :transport-fn transport-fn))
+                  client (if (= :unix kind)
+                           (nrepl/connect :socket path)
+                           (nrepl/connect :port (:port server)))]
+              (try
+                (transport/send client {:op "eval" :code "(+ 1 1)" :id "during-close"})
+                (deref accepted 5000 nil)
+                (is (not= ::bounded/timeout
+                          (bounded/bounded #(do (server/stop-server server)
+                                                (record! :stop-returned)
+                                                (deliver stop-returned true)))))
+                (is (= [:accepted :listener-closed :final-accept :stop-returned] @events))
+                (is (zero? @transports-made))
+                (is (th/thrown-with? th/disconnected? (transport/recv client 5000)))
+                (finally
+                  (th/close! client)
+                  (bounded/bounded #(server/stop-server server))))))
+          (finally
+            (th/delete-recursively! dir)))))))
+
 (deftest tcp-server-url-test
   (doseq [transport-fn [#'transport/bencode #'transport/edn]]
     (let [server (server/start-server :transport-fn transport-fn)]
