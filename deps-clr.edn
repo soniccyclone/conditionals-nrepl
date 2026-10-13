@@ -13,4 +13,11 @@
                                      nrepl.util.runtime-test
                                      nrepl.util.reflect-test
                                      nrepl.util.threading-test
-                                     nrepl.bencode-test]}}}}
+                                     nrepl.bencode-test
+                                     nrepl.transport-test
+                                     nrepl.socket-clr-test
+                                     nrepl.tls-clr-test
+                                     nrepl.middleware.print-test
+                                     nrepl.util.out-test
+                                     nrepl.sanity-test
+                                     nrepl.middleware-test]}}}}

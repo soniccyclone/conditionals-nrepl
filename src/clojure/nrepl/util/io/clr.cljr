@@ -37,13 +37,21 @@
 (import '(nrepl CallbackBufferedWriter QuotaBoundWriter QuotaExceededException
                 QueuePollingReader TeeWriter))
 
-(defmacro ^:private string-action
-  [[arg] & body]
-  `(gen-delegate ~(symbol "System.Action`1[System.String]") [~arg] ~@body))
+(def ^:private target-action-type
+  (symbol "System.Action`2[System.Object,System.String]"))
 
-(defn- callback->action
-  [f]
-  (string-action [s] (f s)))
+(defmacro ^:private target-action
+  []
+  `(gen-delegate ~target-action-type [f# s#] (f# s#)))
+
+(def ^:private invoke-target
+  (target-action))
+
+(defmacro ^:private callback-writer
+  [callback buffer-size]
+  (let [action (gensym "action")]
+    `(let [~(with-meta action {:tag target-action-type}) invoke-target]
+       (CallbackBufferedWriter. ~action ~callback (int ~buffer-size)))))
 
 (defn pushback-input-stream
   ^PushbackInputStream [^Stream in]
@@ -182,7 +190,7 @@
 
 (defn replying-writer
   ^TextWriter [callback buffer-size quota]
-  (-> (CallbackBufferedWriter. (callback->action callback) (int buffer-size))
+  (-> (callback-writer callback buffer-size)
       (quota-writer quota)))
 
 (defn print-with-quota
@@ -196,7 +204,7 @@
 
 (defn tee-writer
   ^TextWriter [^TextWriter original callback]
-  (TeeWriter. original (CallbackBufferedWriter. (callback->action callback) (int 1024))))
+  (TeeWriter. original (callback-writer callback 1024)))
 
 (defn root-writer
   ^TextWriter [^TextWriter stream]

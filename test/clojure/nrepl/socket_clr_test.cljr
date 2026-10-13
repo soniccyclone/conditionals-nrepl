@@ -1,0 +1,313 @@
+(ns nrepl.socket-clr-test
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest testing is]]
+            [nrepl.socket :as sut]
+            [nrepl.test-helpers.bounded :as bounded]
+            [nrepl.util.io :as io])
+  (:import (System.IO EndOfStreamException IOException Stream)
+           (System.Net IPAddress)
+           (System.Net.Sockets LingerOption NetworkStream Socket SocketError
+                               SocketException TcpListener)
+           (System.Threading Thread)))
+
+(defn- socket-exception [code]
+  (SocketException. (int code)))
+
+(defn- wrapped [code]
+  (IOException. "wrapped" ^Exception (socket-exception code)))
+
+(defn- with-pair
+  [f]
+  (let [listener (sut/inet-socket "127.0.0.1" 0)
+        client (sut/connect "127.0.0.1" (sut/local-port listener))
+        server (sut/accept listener)]
+    (try
+      (f client server)
+      (finally
+        (sut/close-connection! client)
+        (sut/close-connection! server)
+        (sut/close-listener! listener)))))
+
+(defn- read-text
+  [^System.IO.Stream in n]
+  (let [buf (byte-array n)]
+    (loop [off 0]
+      (when (< off n)
+        (let [k (.Read in buf (int off) (int (- n off)))]
+          (when (pos? k)
+            (recur (+ off k))))))
+    (io/utf8-string buf)))
+
+(defn- caught [f]
+  (try (f) nil (catch Exception e e)))
+
+(defn- bounded-caught [f]
+  (let [r (bounded/bounded #(caught f))]
+    (is (not= ::bounded/timeout r))
+    r))
+
+(defn- await-caught [handle]
+  (let [r (bounded/await-result handle)]
+    (is (not= ::bounded/timeout r))
+    r))
+
+(deftest disconnected-exception-test
+  (testing "disconnected-exception builds an exception that disconnected? recognises"
+    (let [e (sut/disconnected-exception "gone")]
+      (is (instance? IOException e))
+      (is (sut/disconnected? e))
+      (is (= "gone" (ex-message e)))))
+
+  (testing "disconnected? is false for other exceptions"
+    (is (not (sut/disconnected? (IOException. "gone"))))
+    (is (not (sut/disconnected? (ObjectDisposedException. "gone"))))
+    (is (not (sut/disconnected? (wrapped SocketError/TimedOut))))
+    (is (not (sut/disconnected? (socket-exception SocketError/TimedOut))))
+    (is (not (sut/disconnected? nil)))))
+
+(deftest disconnected-predicate-test
+  (testing "an IOException wrapping an aborted, reset or shut down connection"
+    (is (sut/disconnected? (wrapped SocketError/ConnectionAborted)))
+    (is (sut/disconnected? (wrapped SocketError/ConnectionReset)))
+    (is (sut/disconnected? (wrapped SocketError/Shutdown))))
+
+  (testing "the same socket errors raised directly"
+    (is (sut/disconnected? (socket-exception SocketError/ConnectionAborted)))
+    (is (sut/disconnected? (socket-exception SocketError/ConnectionReset)))
+    (is (sut/disconnected? (socket-exception SocketError/Shutdown))))
+
+  (testing "the end of a stream"
+    (is (sut/disconnected? (EndOfStreamException. "eof")))))
+
+(deftest closed-exception-test
+  (testing "closed-exception? recognises what a closed listener or socket raises"
+    (is (sut/closed-exception? (ObjectDisposedException. "closed")))
+    (is (sut/closed-exception? (socket-exception SocketError/Interrupted)))
+    (is (sut/closed-exception? (socket-exception SocketError/OperationAborted))))
+
+  (testing "closed-exception? is false for other exceptions"
+    (is (not (sut/closed-exception? (socket-exception SocketError/ConnectionReset))))
+    (is (not (sut/closed-exception? (IOException. "gone"))))
+    (is (not (sut/closed-exception? (InvalidOperationException. "gone"))))
+    (is (not (sut/closed-exception? (sut/disconnected-exception "gone"))))
+    (is (not (sut/closed-exception? nil)))))
+
+(deftest tcp-listener-test
+  (let [ss (sut/inet-socket "127.0.0.1" 0)]
+    (try
+      (testing "local-port is the bound port"
+        (is (pos? (sut/local-port ss))))
+
+      (testing "as-nrepl-uri-string is the uri text of the listener"
+        (is (= (str "nrepl://127.0.0.1:" (sut/local-port ss))
+               (sut/as-nrepl-uri-string {:host "127.0.0.1" :server-socket ss} "nrepl")))
+        (is (= (str "nrepl+edn://[::1]:" (sut/local-port ss))
+               (sut/as-nrepl-uri-string {:host "::1" :server-socket ss} "nrepl+edn"))))
+
+      (testing "connect opens a client connection that close-connection! closes"
+        (let [^Socket client (sut/connect "127.0.0.1" (sut/local-port ss))]
+          (is (sut/is-connected? client))
+          (sut/close-connection! client)
+          (is (not (sut/is-connected? client)))
+          (is (thrown? ObjectDisposedException (.Send client ^bytes (byte-array 1))))))
+
+      (testing "listener-closed? follows close-listener!"
+        (is (not (sut/listener-closed? ss)))
+        (sut/close-listener! ss)
+        (is (sut/listener-closed? ss))
+        (sut/close-listener! ss)
+        (is (sut/listener-closed? ss)))
+      (finally
+        (sut/close-listener! ss)))))
+
+(deftest inet-socket-bind-test
+  (testing "no bind address and no port means loopback on a free port"
+    (let [ss (sut/inet-socket nil nil)]
+      (try
+        (is (pos? (sut/local-port ss)))
+        (sut/close-connection! (sut/connect "127.0.0.1" (sut/local-port ss)))
+        (finally (sut/close-listener! ss)))))
+
+  (testing "a host name binds an IPv4 address even though localhost resolves to ::1 first"
+    (let [ss (sut/inet-socket "localhost" 0)]
+      (try
+        (sut/close-connection! (sut/connect "127.0.0.1" (sut/local-port ss)))
+        (finally (sut/close-listener! ss)))))
+
+  (testing "a numeric address is used as given"
+    (let [ss (sut/inet-socket "0.0.0.0" 0)]
+      (try
+        (sut/close-connection! (sut/connect "127.0.0.1" (sut/local-port ss)))
+        (finally (sut/close-listener! ss)))))
+
+  (testing "a second listener cannot take a port that is in use"
+    (let [ss (sut/inet-socket "127.0.0.1" 0)]
+      (try
+        (let [e (caught #(sut/inet-socket "127.0.0.1" (sut/local-port ss)))]
+          (is (instance? SocketException e))
+          (is (= SocketError/AddressAlreadyInUse (.SocketErrorCode ^SocketException e))))
+        (finally (sut/close-listener! ss)))))
+
+  (testing "an unresolvable host fails with the resolver's SocketException"
+    (let [e (caught #(sut/inet-socket "no-such-host.invalid" 0))]
+      (is (instance? SocketException e))
+      (is (= SocketError/HostNotFound (.SocketErrorCode ^SocketException e))))))
+
+(deftest raw-listener-behaviour-after-stop
+  (testing "a blocked AcceptSocket throws Interrupted after Stop, later calls InvalidOperationException"
+    (let [listener (TcpListener. IPAddress/Loopback (int 0))]
+      (.Start listener)
+      (let [blocked (bounded/spawn #(caught (fn [] (.AcceptSocket listener))))]
+        (bounded/sleep-ms 200)
+        (.Stop listener)
+        (let [e (await-caught blocked)]
+          (is (instance? SocketException e))
+          (is (= SocketError/Interrupted (.SocketErrorCode ^SocketException e)))))
+      (is (instance? InvalidOperationException (caught #(.AcceptSocket listener)))))))
+
+(deftest accept-test
+  (testing "accept returns the connected server side of a client connection"
+    (with-pair
+      (fn [^Socket client ^Socket server]
+        (is (sut/is-connected? server))
+        (is (sut/is-connected? client)))))
+
+  (testing "accept on a closed listener throws something closed-exception? recognises"
+    (let [listener (sut/inet-socket "127.0.0.1" 0)]
+      (sut/close-listener! listener)
+      (let [e (caught #(sut/accept listener))]
+        (is (sut/closed-exception? e))
+        (is (not (sut/disconnected? e))))))
+
+  (testing "closing the listener under a blocked accept throws something closed-exception? recognises"
+    (let [listener (sut/inet-socket "127.0.0.1" 0)
+          blocked (bounded/spawn #(caught (fn [] (sut/accept listener))))]
+      (bounded/sleep-ms 200)
+      (sut/close-listener! listener)
+      (let [e (await-caught blocked)]
+        (is (sut/closed-exception? e))
+        (is (sut/listener-closed? listener)))))
+
+  (testing "a connection accepted before the listener closed keeps working"
+    (let [listener (sut/inet-socket "127.0.0.1" 0)
+          client (sut/connect "127.0.0.1" (sut/local-port listener))
+          server (sut/accept listener)]
+      (try
+        (sut/close-listener! listener)
+        (sut/write (sut/buffered-output client) (io/utf8-bytes "ok"))
+        (let [^System.IO.Stream in (sut/buffered-input server)]
+          (is (= (int \o) (.ReadByte in)))
+          (is (= (int \k) (.ReadByte in))))
+        (finally
+          (sut/close-connection! client)
+          (sut/close-connection! server))))))
+
+(deftest streams-test
+  (testing "both directions share one NetworkStream per socket"
+    (with-pair
+      (fn [^Socket client ^Socket server]
+        (is (instance? NetworkStream (sut/buffered-output client)))
+        (is (identical? (sut/buffered-output client) (sut/buffered-output client)))
+        (is (not (identical? (sut/buffered-output client) (sut/buffered-output server)))))))
+
+  (testing "write sends the whole array, or the given slice"
+    (with-pair
+      (fn [^Socket client ^Socket server]
+        (let [out (sut/buffered-output client)
+              in (sut/buffered-input server)]
+          (sut/write out (io/utf8-bytes "abc"))
+          (sut/write out (io/utf8-bytes "xdefz") 1 3)
+          (is (= "abcdef" (read-text in 6)))))))
+
+  (testing "a stream passes through as its own input and output"
+    (let [ms (System.IO.MemoryStream.)]
+      (is (identical? ms (sut/buffered-input ms)))
+      (is (identical? ms (sut/buffered-output ms)))
+      (sut/write ms (io/utf8-bytes "hello"))
+      (sut/write ms (io/utf8-bytes "hello") 1 2)
+      (is (= "helloel" (io/utf8-string (.ToArray ms)))))))
+
+(deftest read-after-disconnection-test
+  (testing "a peer that closes cleanly ends the stream"
+    (with-pair
+      (fn [^Socket client ^Socket server]
+        (let [^Stream in (sut/buffered-input server)]
+          (sut/close-connection! client)
+          (is (= -1 (bounded/bounded #(.ReadByte in))))))))
+
+  (testing "closing a socket under a blocked reader throws a disconnection"
+    (with-pair
+      (fn [_client ^Socket server]
+        (let [^Stream in (sut/buffered-input server)
+              blocked (bounded/spawn #(caught (fn [] (.ReadByte in))))]
+          (bounded/sleep-ms 200)
+          (sut/close-connection! server)
+          (let [e (await-caught blocked)]
+            (is (instance? IOException e))
+            (is (instance? SocketException (.InnerException ^Exception e)))
+            (is (= SocketError/ConnectionAborted
+                   (.SocketErrorCode ^SocketException (.InnerException ^Exception e))))
+            (is (sut/disconnected? e))
+            (is (not (sut/is-connected? server))))))))
+
+  (testing "a peer that resets the connection throws a disconnection"
+    (with-pair
+      (fn [^Socket client ^Socket server]
+        (let [^Stream in (sut/buffered-input server)]
+          (set! (.LingerState client) (LingerOption. true 0))
+          (sut/close-connection! client)
+          (let [e (bounded-caught #(.ReadByte in))]
+            (is (instance? IOException e))
+            (is (sut/disconnected? e)))))))
+
+  (testing "writing to a peer that has gone throws a disconnection"
+    (with-pair
+      (fn [^Socket client ^Socket server]
+        (let [out (sut/buffered-output server)
+              chunk (byte-array 65536)]
+          (sut/close-connection! client)
+          (let [e (loop [n 0]
+                    (or (bounded/bounded #(caught (fn [] (sut/write out chunk))))
+                        (when (< n 100)
+                          (bounded/sleep-ms 20)
+                          (recur (inc n)))))]
+            (is (instance? IOException e))
+            (is (sut/disconnected? e))
+            (is (not (sut/is-connected? server)))))))))
+
+(deftest connect-failure-test
+  (testing "connecting to a port nobody listens on throws a refused SocketException"
+    (let [listener (sut/inet-socket "127.0.0.1" 0)
+          port (sut/local-port listener)]
+      (sut/close-listener! listener)
+      (let [e (caught #(sut/connect "127.0.0.1" port))]
+        (is (instance? SocketException e))
+        (is (= SocketError/ConnectionRefused (.SocketErrorCode ^SocketException e)))))))
+
+(deftest parse-uri-test
+  (testing "parse-uri returns scheme, host and port of a string"
+    (is (= {:scheme "nrepl" :host "example.org" :port 7888}
+           (sut/parse-uri "nrepl://example.org:7888"))))
+
+  (testing "parse-uri reports the port as -1 when the url has none, even for a scheme with a default port"
+    (is (= -1 (:port (sut/parse-uri "nrepl://example.org"))))
+    (is (= -1 (:port (sut/parse-uri "telnet://example.org")))))
+
+  (testing "parse-uri accepts a System.Uri"
+    (is (= {:scheme "nrepl+edn" :host "h" :port 5}
+           (sut/parse-uri (System.Uri. "nrepl+edn://h:5")))))
+
+  (testing "parse-uri throws for a malformed url"
+    (is (thrown? System.UriFormatException (sut/parse-uri "nrepl://exa mple.org")))))
+
+(deftest unsupported-test
+  (testing "unix domain sockets are reported as unsupported with a kind"
+    (doseq [f [#(sut/unix-server-socket "/tmp/x") #(sut/unix-client-socket "/tmp/x")]]
+      (let [e (caught f)]
+        (is (instance? clojure.lang.ExceptionInfo e))
+        (is (= :nrepl.socket/unsupported (:nrepl/kind (ex-data e))))
+        (is (str/includes? (ex-message e) "not supported on ClojureCLR yet")))))
+
+  (testing "the URI text of a listener that is not TCP is unsupported"
+    (let [e (caught #(sut/as-nrepl-uri-string {:host nil :server-socket :nothing} "nrepl"))]
+      (is (= :nrepl.socket/unsupported (:nrepl/kind (ex-data e)))))))

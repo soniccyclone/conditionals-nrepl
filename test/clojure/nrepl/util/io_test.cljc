@@ -831,3 +831,38 @@
            (is (str/includes? (ex-message e) "dotnet build -c Release src/csharp/nrepl/nrepl.csproj"))
            (is (str/includes? (ex-message e) "/nonexistent/nrepl.dll"))
            (is (= :nrepl.util.io.clr/dll-not-found (:nrepl/kind (ex-data e)))))))))
+
+#?(:cljr
+   (defn- creation-ms [make-writer n]
+     (let [watch (System.Diagnostics.Stopwatch/StartNew)]
+       (dotimes [_ n] (make-writer))
+       (double (.ElapsedMilliseconds watch)))))
+
+#?(:cljr
+   (deftest writer-creation-cost-is-flat
+     (testing "replying writers dispatch to their own callback"
+       (let [seen (atom [])
+             writers (mapv (fn [i] (io/replying-writer #(swap! seen conj [i %]) 1024 nil))
+                           (range 3))]
+         (doseq [[i w] (map-indexed vector writers)]
+           (io/write-string! w (str "w" i "\n")))
+         (is (= [[0 "w0\n"] [1 "w1\n"] [2 "w2\n"]] @seen))))
+     (testing "tee writers dispatch to their own callback"
+       (let [seen (atom [])
+             tees (mapv (fn [i] (io/tee-writer (StringWriter.) #(swap! seen conj [i %]))) (range 3))]
+         (doseq [[i w] (map-indexed vector tees)]
+           (io/write-string! w (str "t" i "\n")))
+         (is (= [[0 "t0\n"] [1 "t1\n"] [2 "t2\n"]] @seen))))
+     (testing "the last thousand of 6000 replying writers cost about what the first thousand did and stay cheap"
+       (let [make #(io/replying-writer (fn [_]) 1024 nil)
+             first-ms (creation-ms make 1000)
+             _ (creation-ms make 4000)
+             last-ms (creation-ms make 1000)]
+         (is (< last-ms (min 150.0 (+ 50.0 (* 3.0 first-ms)))) (str first-ms " ms then " last-ms " ms"))))
+     (testing "the same holds for tee writers"
+       (let [original (StringWriter.)
+             make #(io/tee-writer original (fn [_]))
+             first-ms (creation-ms make 1000)
+             _ (creation-ms make 4000)
+             last-ms (creation-ms make 1000)]
+         (is (< last-ms (min 150.0 (+ 50.0 (* 3.0 first-ms)))) (str first-ms " ms then " last-ms " ms"))))))

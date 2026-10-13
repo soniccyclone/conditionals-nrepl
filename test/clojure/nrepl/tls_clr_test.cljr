@@ -1,0 +1,38 @@
+(ns nrepl.tls-clr-test
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest testing is]]
+            [nrepl.core :as nrepl]
+            [nrepl.server :as server]
+            [nrepl.socket :as socket]
+            [nrepl.tls :as sut]))
+
+(defn- caught [f]
+  (try (f) nil (catch Exception e e)))
+
+(defn- unsupported? [e]
+  (and (instance? clojure.lang.ExceptionInfo e)
+       (= :nrepl.tls/tls-unsupported (:nrepl/kind (ex-data e)))
+       (= "TLS is not supported on ClojureCLR yet" (ex-message e))))
+
+(deftest tls-functions-are-unsupported
+  (testing "each function that needs TLS throws the unsupported kind"
+    (is (unsupported? (caught #(sut/ssl-context-or-throw "keys" nil))))
+    (is (unsupported? (caught #(sut/ssl-context-or-throw nil "keys.pem"))))
+    (is (unsupported? (caught #(sut/ssl-context-or-throw nil nil))))
+    (is (unsupported? (caught #(sut/server-socket nil "127.0.0.1" 0))))
+    (is (unsupported? (caught #(sut/socket nil "127.0.0.1" 1 1000))))
+    (is (unsupported? (caught #(sut/accept nil))))))
+
+(deftest handshake-exception-test
+  (testing "no exception is a handshake exception"
+    (is (false? (sut/handshake-exception? (Exception. "x"))))
+    (is (false? (sut/handshake-exception? (System.Security.Authentication.AuthenticationException. "x"))))
+    (is (false? (sut/handshake-exception? nil)))))
+
+(deftest tls-entry-points-are-unsupported
+  (testing "starting a TLS server fails with the unsupported kind and leaves no listener behind"
+    (is (unsupported? (caught #(server/start-server :tls? true :tls-keys-str "keys"))))
+    (is (unsupported? (caught #(socket/inet-socket "127.0.0.1" 0 :context)))))
+
+  (testing "connecting with TLS keys fails with the unsupported kind"
+    (is (unsupported? (caught #(nrepl/connect :port 1 :tls-keys-str "keys"))))))

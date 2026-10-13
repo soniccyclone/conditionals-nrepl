@@ -1,9 +1,40 @@
 (ns nrepl.util.out-test
   (:require [clojure.test :refer :all]
             [clojure.string :as str]
-            [nrepl.test-helpers :refer [eval-in-jvm is+ newline->sys]]
+            [nrepl.test-helpers :as th :refer [is+ newline->sys #?(:clj eval-in-jvm)]]
             [nrepl.util.out :as out])
-  (:import nrepl.out.CallbackBufferedOutputStream))
+  #?(:clj (:import nrepl.out.CallbackBufferedOutputStream)
+     :cljr (:import (System.IO StringWriter TextWriter)
+                    (System.Threading Thread ThreadStart))))
+
+(defn- sys-out []
+  #?(:clj System/out
+     :cljr Console/Out))
+
+(defn- sys-err []
+  #?(:clj System/err
+     :cljr Console/Error))
+
+(defn- set-sys-out! [x]
+  #?(:clj (System/setOut x)
+     :cljr (Console/SetOut x)))
+
+(defn- set-sys-err! [x]
+  #?(:clj (System/setErr x)
+     :cljr (Console/SetError x)))
+
+(defn- println-out [s]
+  #?(:clj (.println System/out ^String s)
+     :cljr (.WriteLine Console/Out ^String s)))
+
+(defn- println-err [s]
+  #?(:clj (.println System/err ^String s)
+     :cljr (.WriteLine Console/Error ^String s)))
+
+(defn- start-thread [f]
+  #?(:clj (.start (Thread. ^Runnable f))
+     :cljr (.Start (Thread. (gen-delegate ThreadStart []
+                                          (try (f) (catch Exception _)))))))
 
 (defn- reset-callbacks-fixture
   "Helper to reset the internal state for testing."
@@ -18,11 +49,11 @@
   Callbacks are invoked on nREPL's transport executor, so the tests have to
   wait for them to have run instead of assuming they already have."
   [pred timeout-ms]
-  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+  (let [deadline (+ (th/now-ms) timeout-ms)]
     (loop []
       (or (pred)
-          (when (< (System/currentTimeMillis) deadline)
-            (Thread/sleep 10)
+          (when (< (th/now-ms) deadline)
+            (th/sleep 10)
             (recur))))))
 
 (deftest test-wrap-standard-streams-idempotency
@@ -31,15 +62,15 @@
           original-err (:err @@#'out/original-print-streams)]
       ;; First call should wrap streams
       (out/wrap-standard-streams)
-      (let [first-out System/out
-            first-err System/err]
+      (let [first-out (sys-out)
+            first-err (sys-err)]
         (is (not= original-out first-out))
         (is (not= original-err first-err))
 
         ;; Second call should not change streams again
         (out/wrap-standard-streams)
-        (is (identical? first-out System/out))
-        (is (identical? first-err System/err))))))
+        (is (identical? first-out (sys-out)))
+        (is (identical? first-err (sys-err)))))))
 
 (defn- root-of [v] (alter-var-root v identity))
 
@@ -47,22 +78,22 @@
 
 (defn- with-pristine-streams
   [f]
-  (let [saved-system {:out System/out, :err System/err}
+  (let [saved-system {:out (sys-out), :err (sys-err)}
         saved-wrapped @out/wrapped?
         saved-original-streams @@#'out/original-print-streams
         saved-original-roots @@#'out/original-roots
         saved-roots (mapv root-of root-vars)]
     (try
       (when saved-wrapped
-        (System/setOut (:out saved-original-streams))
-        (System/setErr (:err saved-original-streams))
+        (set-sys-out! (:out saved-original-streams))
+        (set-sys-err! (:err saved-original-streams))
         (doseq [[v root] saved-original-roots]
           (alter-var-root v (constantly root)))
         (reset! out/wrapped? false))
       (f)
       (finally
-        (System/setOut (:out saved-system))
-        (System/setErr (:err saved-system))
+        (set-sys-out! (:out saved-system))
+        (set-sys-err! (:err saved-system))
         (reset! @#'out/original-print-streams saved-original-streams)
         (reset! @#'out/original-roots saved-original-roots)
         (reset! out/wrapped? saved-wrapped)
@@ -72,16 +103,16 @@
 (deftest test-unwrap-standard-streams-restores-originals
   (with-pristine-streams
     (fn []
-      (let [pristine-out System/out
-            pristine-err System/err
+      (let [pristine-out (sys-out)
+            pristine-err (sys-err)
             pristine-roots (mapv root-of root-vars)]
         (out/wrap-standard-streams)
-        (is (not (identical? pristine-out System/out)))
-        (is (not (identical? pristine-err System/err)))
+        (is (not (identical? pristine-out (sys-out))))
+        (is (not (identical? pristine-err (sys-err))))
         (is (true? @out/wrapped?))
         (out/unwrap-standard-streams)
-        (is (identical? pristine-out System/out))
-        (is (identical? pristine-err System/err))
+        (is (identical? pristine-out (sys-out)))
+        (is (identical? pristine-err (sys-err)))
         (is (false? @out/wrapped?))
         (is (every? true? (map identical? pristine-roots (mapv root-of root-vars))))))))
 
@@ -92,16 +123,16 @@
             callback #(when (str/includes? % "unwrap-test") (swap! calls conj %))]
         (out/set-callback :out ::kept callback)
         (out/wrap-standard-streams)
-        (.println System/out "unwrap-test first")
+        (println-out "unwrap-test first")
         (is (wait-for #(= 1 (count @calls)) 5000))
         (out/unwrap-standard-streams)
         (is (= {::kept callback} (get @@#'out/callbacks :out)))
-        (.println System/out "unwrap-test while unwrapped")
-        (Thread/sleep 300)
+        (println-out "unwrap-test while unwrapped")
+        (th/sleep 300)
         (is (= [(newline->sys "unwrap-test first\n")] @calls))
         (out/wrap-standard-streams)
         (is (true? @out/wrapped?))
-        (.println System/out "unwrap-test again")
+        (println-out "unwrap-test again")
         (is (wait-for #(= 2 (count @calls)) 5000))
         (is (= [(newline->sys "unwrap-test first\n") (newline->sys "unwrap-test again\n")] @calls))))))
 
@@ -109,17 +140,20 @@
   (with-pristine-streams
     (fn []
       (reset! @#'out/original-print-streams {})
-      (let [pristine-out System/out
-            pristine-err System/err]
+      (let [pristine-out (sys-out)
+            pristine-err (sys-err)]
         (out/unwrap-standard-streams)
-        (is (identical? pristine-out System/out))
-        (is (identical? pristine-err System/err)))
+        (is (identical? pristine-out (sys-out)))
+        (is (identical? pristine-err (sys-err))))
       (out/wrap-standard-streams)
       (out/unwrap-standard-streams)
-      (let [sentinel (java.io.PrintStream. (java.io.ByteArrayOutputStream.))]
-        (System/setOut sentinel)
+      (let [sentinel #?(:clj (java.io.PrintStream. (java.io.ByteArrayOutputStream.))
+                        :cljr (StringWriter.))]
+        (set-sys-out! sentinel)
         (out/unwrap-standard-streams)
-        (is (identical? sentinel System/out))))))
+        #?(:clj (is (identical? sentinel System/out))
+           :cljr (do (println-out "sentinel")
+                     (is (= (str "sentinel" Environment/NewLine) (str sentinel)))))))))
 
 (deftest test-output-interception
   (testing "callbacks are invoked when output is written"
@@ -131,8 +165,8 @@
       (out/set-callback :err :test3 #(swap! err-calls conj [:test3 %]))
 
       ;; Write to streams
-      (.println System/out "Hello stdout")
-      (.println System/err "Hello stderr")
+      (println-out "Hello stdout")
+      (println-err "Hello stderr")
       (wait-for #(and (= 2 (count @out-calls)) (= 1 (count @err-calls))) 5000)
 
       (is+ #{[:test1 (newline->sys "Hello stdout\n")]
@@ -151,9 +185,9 @@
       (out/set-callback :err :test3 #(swap! err-calls conj [:test3 %]))
 
       ;; Write to streams
-      (.start (Thread. #(println "Hello stdout")))
-      (.start (Thread. #(binding [*out* *err*]
-                          (println "Hello stderr"))))
+      (start-thread #(println "Hello stdout"))
+      (start-thread #(binding [*out* *err*]
+                       (println "Hello stderr")))
       (wait-for #(and (= 2 (count @out-calls)) (= 1 (count @err-calls))) 5000)
 
       (is+ #{[:test1 (newline->sys "Hello stdout\n")]
@@ -170,38 +204,41 @@
       (out/set-callback :out ::good-callback #(swap! out-calls conj %))
 
       (dotimes [_ 10]
-        (.println System/out "1"))
+        (println-out "1"))
       (wait-for #(= 10 (count @out-calls)) 5000)
 
       (is+ (vec (repeat 10 (newline->sys "1\n")))
            @out-calls))))
 
-(deftest test-multibyte-character-handling
-  (doseq [buffer-len (range 10 20)
-          prefix-len (range 1 (inc buffer-len))]
-    (let [chunks   (atom [])
-          callback (fn [s] (swap! chunks conj s))
-          stream   (CallbackBufferedOutputStream. callback buffer-len)
-          prefix (byte-array prefix-len (byte (int \-)))
-          sun (.getBytes "☀" "UTF-8")]
-      (.write stream prefix 0 (count prefix))
-      (.write stream sun 0 (count sun))
-      (.flush stream)
-      (is (str/ends-with? (last @chunks) "☀") (str @chunks))
-      (is (every? #{\- \☀} (apply str @chunks)) (str @chunks)))))
+#?(:clj
+   (deftest test-multibyte-character-handling
+     (doseq [buffer-len (range 10 20)
+             prefix-len (range 1 (inc buffer-len))]
+       (let [chunks   (atom [])
+             callback (fn [s] (swap! chunks conj s))
+             stream   (CallbackBufferedOutputStream. callback buffer-len)
+             prefix (byte-array prefix-len (byte (int \-)))
+             sun (.getBytes "☀" "UTF-8")]
+         (.write stream prefix 0 (count prefix))
+         (.write stream sun 0 (count sun))
+         (.flush stream)
+         (is (str/ends-with? (last @chunks) "☀") (str @chunks))
+         (is (every? #{\- \☀} (apply str @chunks)) (str @chunks))))))
 
-(def ^:private e-acute-roundtrip-code
-  "(require 'nrepl.util.out)
+#?(:clj
+   (def ^:private e-acute-roundtrip-code
+     "(require 'nrepl.util.out)
    (let [got (promise)]
      (nrepl.util.out/wrap-standard-streams)
      (nrepl.util.out/set-callback :out :test #(deliver got %))
      (.write *out* (str (char 0xe9)))
      (.flush *out*)
      (println \"RESULT\" (pr-str (mapv int (deref got 10000 \"\"))))
-     (shutdown-agents))")
+     (shutdown-agents))"))
 
-(deftest wrapped-standard-streams-encode-utf-8-regardless-of-default-charset
-  (let [{:keys [out]} (eval-in-jvm {"file.encoding" "ISO-8859-1"}
-                                   e-acute-roundtrip-code 120000)]
-    (is (= [0xe9] (some->> out (re-find #"RESULT (\[[0-9 ]*\])") second read-string))
-        out)))
+#?(:clj
+   (deftest wrapped-standard-streams-encode-utf-8-regardless-of-default-charset
+     (let [{:keys [out]} (eval-in-jvm {"file.encoding" "ISO-8859-1"}
+                                      e-acute-roundtrip-code 120000)]
+       (is (= [0xe9] (some->> out (re-find #"RESULT (\[[0-9 ]*\])") second read-string))
+           out))))

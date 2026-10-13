@@ -18,6 +18,11 @@ namespace nrepl
             this.buffer = new StringBuilder();
         }
 
+        public CallbackBufferedWriter(Action<object, string> callback, object target, int bufferSize)
+            : this(content => callback(target, content), bufferSize)
+        {
+        }
+
         public override Encoding Encoding
         {
             get { return Encoding.UTF8; }
