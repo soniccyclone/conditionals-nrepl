@@ -36,3 +36,21 @@
           (> n 1000) false
           :else (do (sleep-ms 5)
                     (recur (inc n))))))
+
+(defn start-thread
+  [f]
+  #?(:clj (doto (Thread. ^Runnable f)
+            (.setDaemon true)
+            (.start))
+     :cljr (let [t (Thread. (gen-delegate ThreadStart [] (f)))]
+             (set! (.IsBackground t) true)
+             (.Start t)
+             t)))
+
+(defn interrupt-thread!
+  [t]
+  (#?(:clj .interrupt :cljr .Interrupt) ^Thread t))
+
+(defn thread-alive?
+  [t]
+  (#?(:clj .isAlive :cljr .IsAlive) ^Thread t))

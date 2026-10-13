@@ -3,7 +3,8 @@
   (:require
    [clojure.test :refer :all]
    [nrepl.config :as config]
-   [nrepl.core-test :refer [repl-server-fixture with-repl-server]]))
+   [nrepl.core-test :refer [repl-server-fixture with-repl-server]]
+   [nrepl.middleware.session :as session]))
 
 (use-fixtures :each repl-server-fixture)
 
@@ -26,3 +27,19 @@
       (with-repl-server
         (let [result (repl-values session "nrepl.middleware.session-test/*test-var2*")]
           (is (= [:override] result)))))))
+
+#?(:clj
+   (deftest runnable-in-a-persistent-session-test
+     (let [session' (#'session/create-session {})
+           ran (promise)]
+       (alter-meta! session' into (session/session-exec session'))
+       (try
+         ((:exec (meta session'))
+          "runnable-id"
+          (reify Runnable
+            (run [_] (deliver ran (.getName (Thread/currentThread)))))
+          nil
+          {:session session'})
+         (is (= (str "nREPL-session-" (:id (meta session'))) (deref ran 5000 :timeout)))
+         (finally
+           ((:close (meta session'))))))))

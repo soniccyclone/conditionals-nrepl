@@ -10,4 +10,7 @@
                               :nses [nrepl.test-helpers.match-test
                                      nrepl.csharp-helpers-test
                                      nrepl.util.io-test
+                                     nrepl.util.runtime-test
+                                     nrepl.util.reflect-test
+                                     nrepl.util.threading-test
                                      nrepl.bencode-test]}}}}

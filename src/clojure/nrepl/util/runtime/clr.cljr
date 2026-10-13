@@ -1,0 +1,127 @@
+(ns nrepl.util.runtime.clr
+  "internal host seam"
+  {:no-doc true}
+  (:require
+   [clojure.clr.io :as cio]
+   [clojure.edn :as edn])
+  (:import
+   (clojure.lang Compiler PushbackTextReader)
+   (System ConsoleCancelEventArgs ConsoleCancelEventHandler EventHandler
+           PlatformNotSupportedException)
+   (System.IO Directory DirectoryInfo File FileInfo Path TextReader TextWriter)
+   (System.Reflection BindingFlags FieldInfo)
+   (System.Runtime ControlledExecution)
+   (System.Runtime.InteropServices RuntimeInformation)
+   (System.Threading CancellationTokenSource Thread)))
+
+(def host :clr)
+
+(def java-version nil)
+
+(defn host-version
+  []
+  {:major (.Major Environment/Version)
+   :version-string (RuntimeInformation/FrameworkDescription)})
+
+(defn attach-self-enabled?
+  []
+  false)
+
+(defn class-name-of
+  [e]
+  (str (class e)))
+
+(defn print-stack-trace
+  [e w]
+  (.Write ^TextWriter w (.ToString ^Exception e)))
+
+(defn- static-var
+  [^String field-name]
+  (let [^FieldInfo field (.GetField Compiler field-name
+                                    (enum-or BindingFlags/NonPublic BindingFlags/Static))]
+    (.GetValue field nil)))
+
+(def ^:private method-var (static-var "MethodVar"))
+(def ^:private loop-locals-var (static-var "LoopLocalsVar"))
+(def ^:private next-local-num-var (static-var "NextLocalNumVar"))
+
+(defn load-file-bindings
+  []
+  {method-var nil
+   Compiler/LocalEnvVar nil
+   loop-locals-var nil
+   next-local-num-var 0})
+
+(def ^:private can-stop
+  (delay
+    (try
+      (ControlledExecution/Run (gen-delegate System.Action [] nil)
+                               (.Token (CancellationTokenSource.)))
+      true
+      (catch PlatformNotSupportedException _ false))))
+
+(defn can-stop-threads?
+  []
+  @can-stop)
+
+(defn exit!
+  [status]
+  (Environment/Exit (int status)))
+
+(defn block-forever!
+  []
+  (.Join (Thread/CurrentThread)))
+
+(defn on-sigint!
+  [f]
+  (let [handler (gen-delegate ConsoleCancelEventHandler [sender ^ConsoleCancelEventArgs args]
+                              (set! (.Cancel args) true)
+                              (try
+                                (f args)
+                                (catch Exception e
+                                  (.WriteLine Console/Error (str "ERROR: " e)))))]
+    (Console/add_CancelKeyPress handler)
+    handler))
+
+(defn delete-on-exit!
+  [path]
+  (let [^String p (str path)]
+    (.add_ProcessExit AppDomain/CurrentDomain
+                      (gen-delegate EventHandler [sender args]
+                                    (when (File/Exists p)
+                                      (File/Delete p))))))
+
+(defn home-dir
+  []
+  (let [home (Environment/GetFolderPath Environment+SpecialFolder/UserProfile)]
+    (when-not (= "" home) home)))
+
+(defn getenv
+  [k]
+  (Environment/GetEnvironmentVariable ^String k))
+
+(defn path-join
+  (^FileInfo [path]
+   (FileInfo. (str path)))
+  (^FileInfo [parent child]
+   (FileInfo. (Path/Combine (str parent) (str child)))))
+
+(defn path-exists?
+  [path]
+  (let [p (str path)]
+    (boolean (or (File/Exists p) (Directory/Exists p)))))
+
+(defn parent-dir
+  ^DirectoryInfo [path]
+  (let [parent (Path/GetDirectoryName (str path))]
+    (when-not (or (nil? parent) (= "" parent))
+      (DirectoryInfo. parent))))
+
+(defn read-edn-file
+  [path]
+  (with-open [^TextReader r (cio/text-reader path)]
+    (edn/read (PushbackTextReader. r))))
+
+(defn version-string
+  []
+  (str (AppContext/GetData "nrepl.version")))
