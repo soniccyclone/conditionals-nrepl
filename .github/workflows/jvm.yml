@@ -1,0 +1,177 @@
+name: JVM tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  JAVA_OPTS: -Xmx3200m -Dclojure.main.report=stderr
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, Clojure ${{ matrix.clojure }}, Temurin ${{ matrix.jdk }}${{ matrix.aliases }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '17', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '21', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '25', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '26', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '8', aliases: ':+junixsocket'}
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '11', aliases: ':+junixsocket'}
+          - {os: ubuntu-latest, clojure: '1.13', jdk: '17', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.13', jdk: '21', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.13', jdk: '25', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.13', jdk: '26', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.10', jdk: '8', aliases: ':+junixsocket'}
+          - {os: ubuntu-latest, clojure: '1.10', jdk: '26', aliases: ':+junixsocket'}
+          - {os: ubuntu-latest, clojure: '1.11', jdk: '8', aliases: ':+junixsocket'}
+          - {os: ubuntu-latest, clojure: '1.11', jdk: '26', aliases: ':+junixsocket'}
+          - {os: windows-latest, clojure: '1.12', jdk: '21', aliases: ''}
+    env:
+      CLOJURE_VERSION: ${{ matrix.clojure }}
+      TEST_LOG: ${{ runner.temp }}/jvm-test.log
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: ${{ matrix.jdk }}
+
+    - uses: DeLaGuardo/setup-clojure@13.7.0
+      with:
+        cli: 1.12.5.1645
+
+    - name: Cache dependencies
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.m2
+          ~/.gitlibs
+          .cpcache
+        key: jvm-${{ runner.os }}-clj${{ matrix.clojure }}-${{ hashFiles('deps.edn') }}
+        restore-keys: |
+          jvm-${{ runner.os }}-clj${{ matrix.clojure }}-
+
+    - name: Prepare dependencies
+      run: |
+        prepare() {
+          clojure -P -T:build || return 1
+          clojure -P -M:${{ matrix.clojure }}:dev:test${{ matrix.aliases }} || return 1
+        }
+        attempt=1
+        until prepare; do
+          if [ "$attempt" -ge 3 ]; then
+            echo "Giving up after $attempt attempts."
+            exit 1
+          fi
+          attempt=$((attempt + 1))
+          echo "Downloading dependencies failed, retrying..."
+          sleep 5
+        done
+
+    - name: Run the tests
+      run: |
+        java -version
+        clojure -T:build javac :with-tests true
+        clojure -M:${{ matrix.clojure }}:dev:test${{ matrix.aliases }} 2>&1 | tee "$TEST_LOG"
+
+    - name: Summarize the results
+      if: always()
+      run: |
+        {
+          echo "### ${{ matrix.os }}, Clojure ${{ matrix.clojure }}, Temurin ${{ matrix.jdk }}"
+          echo
+          echo "- OS: ${{ matrix.os }}"
+          echo "- Clojure: ${{ matrix.clojure }}"
+          echo "- Java: $(java -version 2>&1 | sed -n 2p | tr -d '\r')"
+          echo "- Aliases: \`${{ matrix.aliases }}\`"
+        } >> "$GITHUB_STEP_SUMMARY"
+        if [ ! -f "$TEST_LOG" ]; then
+          echo "- Result: the tests did not run" >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        count="$(sed 's/\x1b\[[0-9;]*m//g' "$TEST_LOG" | tr -d '\r' | grep -E '^[0-9]+ tests?, [0-9]+ assertions?, ' | tail -n 1 || true)"
+        if [ -z "$count" ]; then
+          echo "- Result: no kaocha count line in the test output" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+        fi
+        echo "- Result: $count" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: test-results-${{ matrix.os }}-clj${{ matrix.clojure }}-jdk${{ matrix.jdk }}${{ contains(matrix.aliases, 'junixsocket') && '-junixsocket' || '' }}
+        path: test-results/
+        if-no-files-found: warn
+
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      CLOJURE_VERSION: '1.12'
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: '26'
+
+    - uses: DeLaGuardo/setup-clojure@13.7.0
+      with:
+        cli: 1.12.5.1645
+
+    - name: Cache dependencies
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.m2
+          ~/.gitlibs
+          .cpcache
+        key: jvm-lint-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+        restore-keys: |
+          jvm-lint-${{ runner.os }}-
+
+    - name: Prepare dependencies
+      run: |
+        prepare() {
+          clojure -P -T:build || return 1
+          clojure -P -M:eastwood:+junixsocket || return 1
+          clojure -P -M:cljfmt || return 1
+          clojure -P -M:kondo || return 1
+          clojure -P -M:kondo-clr || return 1
+          clojure -P -X:docs || return 1
+        }
+        attempt=1
+        until prepare; do
+          if [ "$attempt" -ge 3 ]; then
+            echo "Giving up after $attempt attempts."
+            exit 1
+          fi
+          attempt=$((attempt + 1))
+          echo "Downloading dependencies failed, retrying..."
+          sleep 5
+        done
+
+    - name: Lint with clj-kondo, cljfmt and Eastwood
+      run: make lint
+
+    - name: Lint the ClojureCLR branches with clj-kondo
+      run: make kondo-clr
+
+    - name: Verify Cljdoc
+      run: make verify-cljdoc
+
+    - name: Verify the ops docs
+      run: make verify-docs
