@@ -64,6 +64,7 @@
    "-r" "--repl"
    "-f" "--repl-fn"
    "-c" "--connect"
+   "-C" "--color"
    "-b" "--bind"
    "-h" "--host"
    "-p" "--port"

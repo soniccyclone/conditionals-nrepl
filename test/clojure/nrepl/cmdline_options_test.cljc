@@ -39,3 +39,8 @@
            (ex-data e)))
     (is (= "nREPL middleware: unable to resolve nonexistent.ns/required\n"
            (str err)))))
+
+(deftest color-shorthand
+  (let [long-form (options/args->cli-options ["--color" "-p" "5000" "extra"])]
+    (is (true? (:color (first long-form))))
+    (is (= long-form (options/args->cli-options ["-C" "-p" "5000" "extra"])))))
