@@ -8,8 +8,8 @@
    (System.IO EndOfStreamException IOException Path Stream)
    (System.Net Dns IPAddress IPEndPoint)
    (System.Net.Sockets AddressFamily NetworkStream ProtocolType Socket SocketError
-                       SocketException SocketTaskExtensions SocketType TcpListener
-                       UnixDomainSocketEndPoint)
+                       SocketException SocketShutdown SocketTaskExtensions SocketType
+                       TcpListener UnixDomainSocketEndPoint)
    (System.Text Encoding StringBuilder)
    (System.Text.RegularExpressions Match Regex)))
 
@@ -336,8 +336,13 @@
         (throw e)))))
 
 (defn close-connection!
-  [s]
-  (.Dispose ^Socket s))
+  [^Socket s]
+  (when (= AddressFamily/Unix (.AddressFamily s))
+    (try
+      (.Shutdown s SocketShutdown/Both)
+      (catch SocketException _)
+      (catch ObjectDisposedException _)))
+  (.Dispose s))
 
 (def ^:private weak-table-type
   (symbol "System.Runtime.CompilerServices.ConditionalWeakTable`2[System.Net.Sockets.Socket,System.Net.Sockets.NetworkStream]"))
