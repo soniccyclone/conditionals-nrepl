@@ -45,6 +45,9 @@ jobs:
         restore-keys: |
           clr-${{ runner.os }}-
 
+    - name: Build the C# helpers
+      run: dotnet build -c Release src/csharp/nrepl/nrepl.csproj
+
     - name: Fetch dependencies
       run: cljr -P -X:test
 

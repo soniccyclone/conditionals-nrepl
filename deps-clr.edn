@@ -7,4 +7,5 @@
                                                                  :git/sha "d21dfc3"}}
                   :exec-fn nrepl.clr-test-runner/run
                   :exec-args {:dirs ["test/clojure"]
-                              :nses [nrepl.test-helpers.match-test]}}}}
+                              :nses [nrepl.test-helpers.match-test
+                                       nrepl.csharp-helpers-test]}}}}
