@@ -71,6 +71,7 @@ jobs:
 
     - name: Run the tests
       id: test
+      timeout-minutes: 20
       shell: bash
       run: cljr -X:test 2>&1 | tee "$RUNNER_TEMP/clr-test.log"
 
