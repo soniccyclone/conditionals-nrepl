@@ -8,6 +8,7 @@
    (clojure.lang LineNumberingTextReader PushbackInputStream PushbackTextReader)
    (System.IO BufferedStream File FileInfo MemoryStream Path Stream StringReader
               StringWriter TextReader TextWriter)
+   (System.Net.Sockets Socket SocketShutdown)
    (System.Reflection Assembly BindingFlags FieldInfo)
    (System.Text Encoding)))
 
@@ -175,6 +176,11 @@
 
 (defn close!
   [x]
+  (when (instance? Socket x)
+    (try
+      (.Shutdown ^Socket x SocketShutdown/Both)
+      (catch Exception _
+        nil)))
   (.Dispose ^IDisposable x))
 
 (defn closeable?

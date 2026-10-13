@@ -287,6 +287,20 @@
             (is (sut/disconnected? e))
             (is (not (sut/is-connected? server)))))))))
 
+(deftest graceful-close-test
+  (testing "a socket io/close! closes under a blocked reader still delivers what was written, then ends the peer's stream"
+    (with-pair
+      (fn [^Socket client ^Socket server]
+        (let [^Stream in (sut/buffered-input server)
+              blocked (bounded/spawn #(caught (fn [] (.ReadByte in))))]
+          (sut/write (sut/buffered-output server) (io/utf8-bytes "bye"))
+          (bounded/sleep-ms 200)
+          (io/close! server)
+          (let [^Stream peer-in (sut/buffered-input client)]
+            (is (= "bye" (read-text peer-in 3)))
+            (is (= -1 (bounded/bounded #(.ReadByte peer-in)))))
+          (await-caught blocked))))))
+
 (deftest connect-failure-test
   (testing "connecting to a port nobody listens on throws a refused SocketException"
     (let [listener (sut/inet-socket "127.0.0.1" 0)
