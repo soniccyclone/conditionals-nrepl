@@ -8,9 +8,11 @@
    #?@(:clj [(com.hypirion.io ClosingPipe Pipe)
              (java.io File)
              (java.net ServerSocket SocketException)
+             (java.nio.file Files)
+             (java.nio.file.attribute FileAttribute)
              (java.util.concurrent TimeUnit)]
        :cljr [(System.Diagnostics Process ProcessStartInfo)
-              (System.IO IOException Path)
+              (System.IO Directory File FileInfo IOException Path)
               (System.Net IPAddress IPEndPoint)
               (System.Net.Sockets SocketError SocketException TcpListener)
               (System.Runtime.InteropServices OSPlatform RuntimeInformation)
@@ -209,6 +211,46 @@
   [path]
   #?(:clj (File. (File. (System/getProperty "nrepl.basedir" ".")) ^String path)
      :cljr (Path/Combine Environment/CurrentDirectory ^String path)))
+
+(defn as-file
+  "A file object for PATH of the host's own type, as source metadata can carry."
+  [path]
+  #?(:clj (File. ^String path)
+     :cljr (FileInfo. ^String path)))
+
+(defn make-temp-dir
+  "Creates an empty directory with a short path under the system's temporary
+  directory (a unix socket path is limited to about 100 characters) and
+  returns its path."
+  [prefix]
+  #?(:clj (str (Files/createTempDirectory ^String prefix (into-array FileAttribute [])))
+     :cljr (let [dir (Path/Combine (Path/GetTempPath)
+                                   (str prefix (subs (str (Guid/NewGuid)) 0 8)))]
+             (Directory/CreateDirectory dir)
+             dir)))
+
+(defn path-join
+  "The path of the entry NAME inside the directory DIR."
+  [dir name]
+  (str dir sys-file-sep name))
+
+(defn path-exists?
+  "Whether a file or directory exists at PATH."
+  [path]
+  #?(:clj (.exists (File. ^String path))
+     :cljr (or (File/Exists ^String path) (Directory/Exists ^String path))))
+
+(defn delete-recursively!
+  "Deletes the file or directory at PATH and everything below it, if it exists."
+  [path]
+  #?(:clj (let [f (File. ^String path)]
+            (when (.isDirectory f)
+              (doseq [^File child (.listFiles f)]
+                (delete-recursively! (.getPath child))))
+            (.delete f))
+     :cljr (cond
+             (Directory/Exists ^String path) (Directory/Delete ^String path true)
+             (File/Exists ^String path) (File/Delete ^String path))))
 
 ;; nrepl-specific helpers
 

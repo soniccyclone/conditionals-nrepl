@@ -16,12 +16,24 @@
                                      nrepl.util.threading-test
                                      nrepl.bencode-test
                                      nrepl.transport-test
+                                     nrepl.socket-test
                                      nrepl.socket-clr-test
                                      nrepl.tls-clr-test
+                                     nrepl.edn-test
+                                     nrepl.misc-test
+                                     nrepl.response-test
                                      nrepl.middleware.print-test
                                      nrepl.util.out-test
                                      nrepl.sanity-test
                                      nrepl.middleware-test
                                      nrepl.core-test
                                      nrepl.middleware.session-test
-                                     nrepl.middleware.interruptible-eval-test]}}}}
+                                     nrepl.middleware.interruptible-eval-test
+                                     nrepl.util.completion-test
+                                     nrepl.util.lookup-test
+                                     nrepl.middleware.completion-test
+                                     nrepl.middleware.lookup-test
+                                     nrepl.middleware.load-file-test
+                                     nrepl.describe-test
+                                     nrepl.cmdline-options-test
+                                     nrepl.cmdline-test]}}}}

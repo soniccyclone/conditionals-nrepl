@@ -4,9 +4,7 @@
    [clojure.test :refer :all]
    [nrepl.core :as nrepl]
    [nrepl.core-test :refer [def-repl-test repl-server-fixture project-base-dir clean-response]]
-   [nrepl.test-helpers :refer [is+]])
-  (:import
-   (java.io File)))
+   [nrepl.test-helpers :refer [is+]]))
 
 (use-fixtures :each repl-server-fixture)
 

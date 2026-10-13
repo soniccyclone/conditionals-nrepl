@@ -1,12 +1,12 @@
 (ns nrepl.misc-test
   (:require [clojure.test :refer [deftest is]]
             [nrepl.misc :as misc]
-            [nrepl.test-helpers :as th]
-            [clojure.java.io :as io])
-  (:import [java.net URI]))
+            [nrepl.test-helpers :as th])
+  #?(:clj (:import [java.net URI])))
 
-(deftest parse-java-version-test
-  (is (= misc/java-version (misc/parse-java-version))))
+#?(:clj
+   (deftest parse-java-version-test
+     (is (= misc/java-version (misc/parse-java-version)))))
 
 (deftest sanitize-meta-test
   (is (not-empty (:file (misc/sanitize-meta {:file "clojure/core.clj"}))))
@@ -14,8 +14,10 @@
   (is (= "/foo/bar/baz.clj"
          (:file (misc/sanitize-meta {:file "/foo/bar/baz.clj"}))))
 
-  (is (= (th/dir-sep->sys "/foo/bar/baz.clj")
-         (:file (misc/sanitize-meta {:file (io/file "/foo/bar/baz.clj")}))))
+  (let [file (th/as-file "/foo/bar/baz.clj")]
+    (is (= (str file)
+           (:file (misc/sanitize-meta {:file file})))))
 
-  (is (= "https://foo.bar"
-         (:file (misc/sanitize-meta {:file (.toURL (URI. "https://foo.bar"))})))))
+  (is (= #?(:clj "https://foo.bar" :cljr "https://foo.bar/")
+         (:file (misc/sanitize-meta {:file #?(:clj (.toURL (URI. "https://foo.bar"))
+                                              :cljr (System.Uri. "https://foo.bar"))})))))

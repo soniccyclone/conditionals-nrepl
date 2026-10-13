@@ -71,11 +71,17 @@
 
 (def ^:private clojure-extensions #{".clj" ".cljc" ".cljr"})
 
+(defn- runtime-dir
+  []
+  (Path/GetDirectoryName (.Location (.Assembly ^Type RT))))
+
 (defn- load-path-dirs
   []
   (into []
-        (filter #(Directory/Exists ^String %))
-        (.Split (load-path) Path/PathSeparator StringSplitOptions/RemoveEmptyEntries)))
+        (comp (filter #(some? %))
+              (filter #(Directory/Exists ^String %)))
+        (cons (runtime-dir)
+              (.Split (load-path) Path/PathSeparator StringSplitOptions/RemoveEmptyEntries))))
 
 (defn- dir-files
   [^String dir]
@@ -99,6 +105,27 @@
   (when (.IsPublic t)
     (str (str/replace (.FullName t) \. \/) ".class")))
 
+(def ^:private extension-rank {".cljr" 0 ".cljc" 1 ".clj" 2})
+
+(defn- source-stem
+  [^String file]
+  (when-let [rank (extension-rank (Path/GetExtension file))]
+    [(subs file 0 (.LastIndexOf file "." StringComparison/Ordinal)) rank]))
+
+(defn- loaded-sources
+  [files]
+  (let [winners (reduce (fn [acc file]
+                          (if-let [[stem rank] (source-stem file)]
+                            (update acc stem (fnil min rank) rank)
+                            acc))
+                        {}
+                        files)]
+    (filter (fn [file]
+              (if-let [[stem rank] (source-stem file)]
+                (= rank (winners stem))
+                true))
+            files)))
+
 (defn classpath-files
   []
   (let [seen (volatile! #{})
@@ -106,8 +133,9 @@
                  (when-not (contains? @seen x)
                    (vswap! seen conj x)
                    true))]
-    (-> []
-        (into (comp (mapcat dir-files) (filter fresh?)) (load-path-dirs))
+    (-> (into [] (comp (mapcat dir-files) (filter fresh?)) (load-path-dirs))
+        loaded-sources
+        vec
         (into (comp (mapcat assembly-types) (keep type-file) (filter fresh?))
               (.GetAssemblies AppDomain/CurrentDomain)))))
 
