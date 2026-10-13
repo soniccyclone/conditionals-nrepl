@@ -89,24 +89,23 @@ jobs:
       env:
         TEST_LOG: ${{ runner.temp }}/jvm-test.log
       run: |
-        {
-          echo "### ${{ matrix.os }}, Clojure ${{ matrix.clojure }}, Temurin ${{ matrix.jdk }}"
-          echo
-          echo "- OS: ${{ matrix.os }}"
-          echo "- Clojure: ${{ matrix.clojure }}"
-          echo "- Java: $(java -version 2>&1 | sed -n 2p | tr -d '\r')"
-          echo "- Aliases: \`${{ matrix.aliases }}\`"
-        } >> "$GITHUB_STEP_SUMMARY"
+        say() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        say "### ${{ matrix.os }}, Clojure ${{ matrix.clojure }}, Temurin ${{ matrix.jdk }}"
+        say ""
+        say "- OS: ${{ matrix.os }}"
+        say "- Clojure: ${{ matrix.clojure }}"
+        say "- Java: $(java -version 2>&1 | sed -n 2p | tr -d '\r')"
+        say "- Aliases: \`${{ matrix.aliases }}\`"
         if [ ! -f "$TEST_LOG" ]; then
-          echo "- Result: the tests did not run" >> "$GITHUB_STEP_SUMMARY"
+          say "- Result: the tests did not run"
           exit 0
         fi
         count="$(sed 's/\x1b\[[0-9;]*m//g' "$TEST_LOG" | tr -d '\r' | grep -E '^[0-9]+ tests?, [0-9]+ assertions?, ' | tail -n 1 || true)"
         if [ -z "$count" ]; then
-          echo "- Result: no kaocha count line in the test output" >> "$GITHUB_STEP_SUMMARY"
+          say "- Result: no kaocha count line in the test output"
           exit 1
         fi
-        echo "- Result: $count" >> "$GITHUB_STEP_SUMMARY"
+        say "- Result: $count"
 
     - name: Upload test results
       if: always()
