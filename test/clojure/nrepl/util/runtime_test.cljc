@@ -115,7 +115,9 @@
 #?(:cljr
    (defn- run-clojure
      [form]
-     (let [info (ProcessStartInfo. "Clojure.Main")]
+     (let [info (ProcessStartInfo. (if (RuntimeInformation/IsOSPlatform OSPlatform/Windows)
+                                     "Clojure.Main.exe"
+                                     "Clojure.Main"))]
        (.Add (.ArgumentList info) "-e")
        (.Add (.ArgumentList info) (str "(require 'nrepl.util.runtime) " form))
        (set! (.UseShellExecute info) false)
@@ -163,7 +165,9 @@
             (is (nil? (runtime/getenv "NREPL_RUNTIME_TEST_NO_SUCH_VARIABLE")))
             (is (= (System/getenv "PATH") (runtime/getenv "PATH"))))
      :cljr (do
-             (is (= (Environment/GetEnvironmentVariable "HOME") (runtime/home-dir)))
+             (is (= (Environment/GetEnvironmentVariable
+                     (if (RuntimeInformation/IsOSPlatform OSPlatform/Windows) "USERPROFILE" "HOME"))
+                    (runtime/home-dir)))
              (is (nil? (runtime/getenv "NREPL_RUNTIME_TEST_NO_SUCH_VARIABLE")))
              (try
                (Environment/SetEnvironmentVariable "NREPL_RUNTIME_TEST_VARIABLE" "value")

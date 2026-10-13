@@ -1,5 +1,6 @@
 (ns nrepl.util.reflect-test
   (:require
+   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [nrepl.util.reflect :as reflect])
   #?(:clj (:import
@@ -214,7 +215,11 @@
        (is (pos? (dead-targets)))
        (is (every? keyword? (reflect/all-keywords))))))
 
+(defn- slashed
+  [s]
+  (str/replace s "\\" "/"))
+
 (deftest resource-path-test
-  (is (re-find #"clojure/core\.clj$" (reflect/resource-path "clojure/core.clj")))
-  (is (re-find #"nrepl/util/reflect\.cljc$" (reflect/resource-path "nrepl/util/reflect.cljc")))
+  (is (re-find #"clojure/core\.clj$" (slashed (reflect/resource-path "clojure/core.clj"))))
+  (is (re-find #"nrepl/util/reflect\.cljc$" (slashed (reflect/resource-path "nrepl/util/reflect.cljc"))))
   (is (nil? (reflect/resource-path "no/such/resource.clj"))))

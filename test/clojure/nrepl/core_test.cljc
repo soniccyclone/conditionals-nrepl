@@ -825,9 +825,9 @@
   (th/sleep 100)
   (is (th/thrown-with? th/connection-refused? (connect :port (:port *server*)))))
 
-(def ^:private disconnection-message
-  #?(:clj #"(?i)(lost.*connection|socket closed|connection reset)"
-     :cljr #"(?i)(lost.*connection|connection abort|connection reset)"))
+#?(:clj
+   (def ^:private disconnection-message
+     #"(?i)(lost.*connection|socket closed|connection reset)"))
 
 (defn- disconnection-exception?
   [e]
@@ -835,8 +835,12 @@
   ;; away either as a reset or, once the transport notices the EOF, as the
   ;; transport's own "lost its connection" message.
   (let [cause (root-cause e)]
-    (and (th/disconnected? cause)
-         (re-find disconnection-message (ex-message cause)))))
+    #?(:clj (and (th/disconnected? cause)
+                 (re-find disconnection-message (ex-message cause)))
+       :cljr (and (instance? System.Net.Sockets.SocketException cause)
+                  (contains? #{System.Net.Sockets.SocketError/ConnectionAborted
+                               System.Net.Sockets.SocketError/ConnectionReset}
+                             (.SocketErrorCode ^System.Net.Sockets.SocketException cause))))))
 
 (deftest transports-fail-on-disconnects
   (testing "Ensure that transports fail ASAP when the server they're connected to goes down."

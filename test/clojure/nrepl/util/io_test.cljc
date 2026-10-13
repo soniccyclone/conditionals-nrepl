@@ -836,7 +836,20 @@
    (defn- creation-ms [make-writer n]
      (let [watch (System.Diagnostics.Stopwatch/StartNew)]
        (dotimes [_ n] (make-writer))
-       (double (.ElapsedMilliseconds watch)))))
+       (/ (double (.ElapsedTicks watch)) (/ System.Diagnostics.Stopwatch/Frequency 1000.0)))))
+
+#?(:cljr
+   (defn- best-creation-ms [make-writer batches]
+     (apply min (repeatedly batches #(creation-ms make-writer 500)))))
+
+#?(:cljr
+   (defn- creation-cost-is-flat? [make-writer]
+     (creation-ms make-writer 500)
+     (let [first-ms (best-creation-ms make-writer 4)
+           _ (creation-ms make-writer 3000)
+           last-ms (best-creation-ms make-writer 4)]
+       {:ok? (< last-ms (min 25.0 (max 5.0 (* 10.0 first-ms))))
+        :message (str "best of four batches of 500: " first-ms " ms first, " last-ms " ms after 3000 more")})))
 
 #?(:cljr
    (deftest writer-creation-cost-is-flat
@@ -853,19 +866,13 @@
          (doseq [[i w] (map-indexed vector tees)]
            (io/write-string! w (str "t" i "\n")))
          (is (= [[0 "t0\n"] [1 "t1\n"] [2 "t2\n"]] @seen))))
-     (testing "the last thousand of 6000 replying writers cost about what the first thousand did and stay cheap"
-       (let [make #(io/replying-writer (fn [_]) 1024 nil)
-             first-ms (creation-ms make 1000)
-             _ (creation-ms make 4000)
-             last-ms (creation-ms make 1000)]
-         (is (< last-ms (min 150.0 (+ 50.0 (* 3.0 first-ms)))) (str first-ms " ms then " last-ms " ms"))))
+     (testing "creating replying writers does not slow down as more exist"
+       (let [{:keys [ok? message]} (creation-cost-is-flat? #(io/replying-writer (fn [_]) 1024 nil))]
+         (is ok? message)))
      (testing "the same holds for tee writers"
        (let [original (StringWriter.)
-             make #(io/tee-writer original (fn [_]))
-             first-ms (creation-ms make 1000)
-             _ (creation-ms make 4000)
-             last-ms (creation-ms make 1000)]
-         (is (< last-ms (min 150.0 (+ 50.0 (* 3.0 first-ms)))) (str first-ms " ms then " last-ms " ms"))))))
+             {:keys [ok? message]} (creation-cost-is-flat? #(io/tee-writer original (fn [_])))]
+         (is ok? message)))))
 
 #?(:cljr
    (deftest stdin-reader-creation-cost-is-flat
@@ -877,9 +884,6 @@
          (is (= [0 1 2] (sort @asked)))
          (doseq [r readers] (io/add-input! r "x"))
          (is (= [(int \x) (int \x) (int \x)] (mapv await-result handles)))))
-     (testing "the last thousand of 6000 stdin readers cost about what the first thousand did and stay cheap"
-       (let [make #(io/stdin-reader (fn []))
-             first-ms (creation-ms make 1000)
-             _ (creation-ms make 4000)
-             last-ms (creation-ms make 1000)]
-         (is (< last-ms (min 150.0 (+ 50.0 (* 3.0 first-ms)))) (str first-ms " ms then " last-ms " ms"))))))
+     (testing "creating stdin readers does not slow down as more exist"
+       (let [{:keys [ok? message]} (creation-cost-is-flat? #(io/stdin-reader (fn [])))]
+         (is ok? message)))))
