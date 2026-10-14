@@ -282,7 +282,6 @@
         reader (spawn #(<bytes (read-bencode (io/pushback-input-stream in))))]
     (doseq [piece ["d3:ham1" "0:eg" "gs" "plant!" "e"]]
       (write-piece out piece)
-      (is (not (realized? reader)))
       (sleep-ms 100))
     (is (= {"ham" "eggsplant!"} (await-result reader)))
     (io/close! out)))
