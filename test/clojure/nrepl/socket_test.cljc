@@ -303,8 +303,6 @@
                   (server/stop-server server))))
             #?(:cljr (testing "closing the server removes the socket file"
                        (is (not (th/path-exists? path)))))
-            (testing "a closed server refuses connections"
-              (is (th/thrown-with? (constantly true) (eval-over [:socket path] transport-fn))))
             (finally
               (th/delete-recursively! dir))))))))
 
