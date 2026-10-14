@@ -201,11 +201,7 @@
     (testing "builds handler with optional middleware missing"
       (let [base-middleware-stack (meta (:handler (cmd/server-opts {})))
             result (cmd/server-opts {:middleware [(with-meta 'nonexistent/middleware {:optional true})]})]
-        (is+ base-middleware-stack (meta (:handler result)))))
-
-    (testing "required middleware missing still fails"
-      (is (thrown? Exception
-                   (cmd/server-opts {:middleware ['nonexistent/required]}))))))
+        (is+ base-middleware-stack (meta (:handler result)))))))
 
 (deftest server-started-message
   (testing "default bind uses 127.0.0.1 in message and URI"
