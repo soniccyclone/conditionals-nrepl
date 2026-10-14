@@ -1,6 +1,7 @@
 (ns ci-matrix
-  "Reads .github/workflows/jvm.yml and clr.yml and writes, for every ubuntu leg,
-  the step scripts the workflow runs plus one row in legs.tsv.
+  "Reads .github/workflows/ci.yml and writes, for every ubuntu leg of the jobs
+  jvm, jvm-macos, lint, clr and clr-full, the step scripts the workflow runs
+  plus one row in legs.tsv.
 
   Usage: clojure -M ci_matrix.clj WORKFLOW-DIR OUT-DIR
 
@@ -76,8 +77,8 @@
   (or (some #(get-in % [:with :java-version]) (:steps job))
       (fail "no setup-java java-version")))
 
-(defn jvm-legs [workflow out-dir]
-  (let [job (get-in workflow [:jobs :test])
+(defn jvm-legs [workflow job-key out-dir]
+  (let [job (or (get-in workflow [:jobs job-key]) (fail "no job " (name job-key)))
         prepare (step-named job "Prepare dependencies")
         run (step-named job "Run the tests")
         cli (cli-version job)]
@@ -115,8 +116,8 @@
     (or (second (re-find pattern install-text))
         (fail "cannot find the " tool " version in the install step"))))
 
-(defn clr-legs [workflow out-dir]
-  (let [job (get-in workflow [:jobs :test])
+(defn clr-legs [workflow job-key out-dir]
+  (let [job (or (get-in workflow [:jobs job-key]) (fail "no job " (name job-key)))
         install (:run (step-named job "Install ClojureCLR and cljr"))
         main-version (tool-version install "Clojure.Main")
         cljr-version (tool-version install "Clojure.Cljr")
@@ -139,10 +140,12 @@
                    :informational (:informational entry))}))))
 
 (defn -main [workflow-dir out-dir]
-  (let [jvm (load-workflow workflow-dir "jvm.yml")
-        legs (concat (jvm-legs jvm out-dir)
-                     [(lint-leg jvm out-dir)]
-                     (clr-legs (load-workflow workflow-dir "clr.yml") out-dir))
+  (let [ci (load-workflow workflow-dir "ci.yml")
+        legs (concat (jvm-legs ci :jvm out-dir)
+                     (jvm-legs ci :jvm-macos out-dir)
+                     [(lint-leg ci out-dir)]
+                     (clr-legs ci :clr out-dir)
+                     (clr-legs ci :clr-full out-dir))
         names (map :leg legs)]
     (when-let [dupes (seq (for [[n c] (frequencies names) :when (> c 1)] n))]
       (fail "duplicate leg names: " (str/join ", " dupes)))

@@ -3,9 +3,7 @@
 </p>
 
 ----------
-[![JVM tests](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/jvm.yml/badge.svg)](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/jvm.yml)
-[![ClojureCLR tests](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/clr.yml/badge.svg)](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/clr.yml)
-[![Spell-check Status](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/spell_checking.yml/badge.svg?event=pull_request)](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/spell_checking.yml)
+[![CI](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/soniccyclone/conditionals-nrepl/actions/workflows/ci.yml)
 [![Backers on Open Collective](https://opencollective.com/nrepl/backers/badge.svg)](#backers)
 [![Sponsors on Open Collective](https://opencollective.com/nrepl/sponsors/badge.svg)](#sponsors)
 
