@@ -682,6 +682,8 @@
                                                        names)]
                                      [(count abort-frames) (< run-frame (first abort-frames))]))))))
 
+(def forced-stop-signals (atom nil))
+
 (defn- drain
   [transport timeout-ms]
   (vec (take-while some? (repeatedly #(transport/recv transport timeout-ms)))))
@@ -730,18 +732,20 @@
 
   (def-repl-test forced-stop-runs-finally
     (with-redefs [threading/force-stop-delay-ms 500]
-      (message session {:op "eval"
-                        :code (code (let [p (atom nil)]
-                                      (def p p)
-                                      (try (loop [] (recur))
-                                           (finally (reset! p :ran)))))})
-      (th/sleep 300)
-      (is+ {:status #{:done}}
-           (-> (message session {:op "interrupt"})
-               first
-               clean-response))
-      (th/sleep (+ 500 1000))
-      (is+ [:ran] (repl-values session "@p"))))
+      (let [spinning (promise)
+            finally-ran (promise)]
+        (reset! forced-stop-signals {:spinning spinning :finally-ran finally-ran})
+        (message session {:op "eval"
+                          :code (code (let [{:keys [spinning finally-ran]} @nrepl.core-test/forced-stop-signals]
+                                        (try (deliver spinning true)
+                                             (loop [] (recur))
+                                             (finally (deliver finally-ran :ran)))))})
+        (deref spinning 30000 nil)
+        (is+ {:status #{:done}}
+             (-> (message session {:op "interrupt"})
+                 first
+                 clean-response))
+        (is (= :ran (deref finally-ran 30000 :timed-out))))))
 
   (def-repl-test interrupt-swallowed-by-user-catch-is-force-stopped
     (with-redefs [threading/force-stop-delay-ms 500]
