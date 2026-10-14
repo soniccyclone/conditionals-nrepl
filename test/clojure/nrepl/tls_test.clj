@@ -253,6 +253,21 @@
                   ^AutoCloseable _ (nrepl/connect :port (:port server))]
         (is (tls-socket-exception? exception))))))
 
+(deftest stop-server-aborts-a-handshake-in-flight
+  (let [[server-keys _] (gen-key-pair)
+        exception (promise)]
+    (with-redefs [tls/*handshake-timeout-ms* 10000]
+      (let [server (server/start-server :tls? true
+                                        :tls-keys-str server-keys
+                                        :consume-exception (partial deliver exception))]
+        (with-open [sock (Socket.)]
+          (.connect sock (InetSocketAddress. "127.0.0.1" ^int (:port server)) 1000)
+          (Thread/sleep 200)
+          (let [started (System/currentTimeMillis)]
+            (server/stop-server server)
+            (is (< (- (System/currentTimeMillis) started) 2000))))
+        (is (instance? SSLException (deref exception 1000 nil)))))))
+
 (deftest regular-connection+eval-fails
   (let [[server-keys _] (gen-key-pair)
         exception (promise)]

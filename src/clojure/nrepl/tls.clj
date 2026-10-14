@@ -327,6 +327,17 @@
   "Number of milliseconds to wait for the TLS handshake to complete."
   30000)
 
+(defn- await-handshake
+  [p ^javax.net.ssl.SSLServerSocket server deadline-ms]
+  (loop []
+    (let [remaining (- deadline-ms (System/currentTimeMillis))
+          v (deref p (max 1 (min 100 remaining)) :pending)]
+      (cond
+        (not= v :pending) v
+        (.isClosed server) :handshake-aborted!
+        (<= remaining 0) :handshake-timeout!
+        :else (recur)))))
+
 (defn accept
   "Accepts a new TLS connection. Waits `*handshake-timeout-ms*` (default: 30 000) milliseconds for the TLS handshake
   to complete. Requires that the client certificate is different from the server certificate."
@@ -346,9 +357,10 @@
                                           (deliver p :handshake-bad!)
                                           (deliver p :handshake-ok!)))))
     (future
-      (when (= :timeout (deref p *handshake-timeout-ms* :timeout))
-        (close-silently sock) ; this will cause .startHandshake to terminate / throw exception
-        (deliver p :handshake-timeout!)))
+      (let [outcome (await-handshake p server (+ (System/currentTimeMillis) *handshake-timeout-ms*))]
+        (when (contains? #{:handshake-timeout! :handshake-aborted!} outcome)
+          (close-silently sock)
+          (deliver p outcome))))
     (try
       (.startHandshake sock) ; can throw IOException
       (let [v @p]
@@ -362,6 +374,11 @@
           (do
             (close-silently sock)
             (throw (SSLHandshakeException. "TLS handshake timed out")))
+
+          (= v :handshake-aborted!)
+          (do
+            (close-silently sock)
+            (throw (SSLHandshakeException. "TLS handshake aborted: the server was stopped")))
 
           :else
           sock))
