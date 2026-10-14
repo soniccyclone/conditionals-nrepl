@@ -103,3 +103,4 @@ There are many ways in which you can help nREPL:
 * Invite members of the nREPL team to speak about nREPL at meetups and conferences
 // ci49 scratch
 // ci49 scratch, second push
+// ci49 scratch, third push after the javac fix
