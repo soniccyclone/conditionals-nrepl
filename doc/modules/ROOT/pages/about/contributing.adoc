@@ -73,18 +73,8 @@ https://github.com/nrepl/nrepl/blob/master/doc/modules/ROOT/nav.adoc[nav.adoc].
 
 === Deploying to Clojars
 
-Releases are done by CircleCI automatically. To push a release, you need to tag
-a commit in the `master` branch with the desired release version, starting with `v`,
-e.g. `v1.2.3`.
-
-[source,shell]
-----
-$ git tag v1.2.3
-$ git push origin v1.2.3
-----
-
-Tagging a new release will also trigger the creation of a
-https://github.com/nrepl/nrepl/releases[GitHub release] automatically.
+This repository has no release automation. Tagging a commit does not deploy
+anything to Clojars and does not create a GitHub release.
 
 == Funding
 
