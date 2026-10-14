@@ -1,0 +1,500 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      full: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+      jvm: ${{ steps.filter.outputs.jvm }}
+      clr: ${{ steps.filter.outputs.clr }}
+      shared: ${{ steps.filter.outputs.shared }}
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+    - uses: actions/checkout@v7
+
+    - id: filter
+      uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
+      with:
+        filters: |
+          jvm:
+            - 'src/java/**'
+            - '**/*.clj'
+            - 'deps.edn'
+            - 'build/**'
+            - 'Makefile'
+            - '.clj-kondo/**'
+            - '.cljfmt.edn'
+          clr:
+            - 'src/csharp/**'
+            - '**/*.cljr'
+            - 'deps-clr.edn'
+          shared:
+            - '**/*.cljc'
+            - 'test/clojure/nrepl/test_helpers/**'
+            - '.github/workflows/ci.yml'
+          docs:
+            - 'doc/**'
+            - '**/*.md'
+            - '**/*.adoc'
+            - 'plan/**'
+
+  jvm:
+    name: test (${{ matrix.os }}, Clojure ${{ matrix.clojure }}, Temurin ${{ matrix.jdk }}${{ matrix.aliases }})
+    needs: changes
+    if: needs.changes.outputs.full == 'true' || needs.changes.outputs.jvm == 'true' || needs.changes.outputs.shared == 'true'
+    runs-on: ${{ matrix.os }}
+    defaults: &jvm-defaults
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '17', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '21', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '25', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '26', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '8', aliases: ':+junixsocket'}
+          - {os: ubuntu-latest, clojure: '1.12', jdk: '11', aliases: ':+junixsocket'}
+          - {os: ubuntu-latest, clojure: '1.13', jdk: '17', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.13', jdk: '21', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.13', jdk: '25', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.13', jdk: '26', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.10', jdk: '8', aliases: ':+junixsocket'}
+          - {os: ubuntu-latest, clojure: '1.10', jdk: '26', aliases: ':+junixsocket'}
+          - {os: ubuntu-latest, clojure: '1.11', jdk: '8', aliases: ':+junixsocket'}
+          - {os: ubuntu-latest, clojure: '1.11', jdk: '26', aliases: ':+junixsocket'}
+          - {os: windows-latest, clojure: '1.12', jdk: '21', aliases: ''}
+          - {os: windows-latest, clojure: '1.10', jdk: '21', aliases: ''}
+          - {os: ubuntu-latest, clojure: '1.10', jdk: '21', aliases: ''}
+    env: &jvm-env
+      JAVA_OPTS: -Xmx3200m -Dclojure.main.report=stderr
+      CLOJURE_VERSION: ${{ matrix.clojure }}
+    steps: &jvm-steps
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: ${{ matrix.jdk }}
+
+    - uses: DeLaGuardo/setup-clojure@13.7.0
+      with:
+        cli: 1.12.5.1645
+
+    - name: Cache dependencies
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.m2
+          ~/.gitlibs
+          .cpcache
+        key: jvm-${{ runner.os }}-clj${{ matrix.clojure }}-${{ hashFiles('deps.edn') }}
+        restore-keys: |
+          jvm-${{ runner.os }}-clj${{ matrix.clojure }}-
+
+    - name: Prepare dependencies
+      run: |
+        prepare() {
+          clojure -P -T:build || return 1
+          clojure -P -M:${{ matrix.clojure }}:dev:test${{ matrix.aliases }} || return 1
+        }
+        attempt=1
+        until prepare; do
+          if [ "$attempt" -ge 3 ]; then
+            echo "Giving up after $attempt attempts."
+            exit 1
+          fi
+          attempt=$((attempt + 1))
+          echo "Downloading dependencies failed, retrying..."
+          sleep 5
+        done
+
+    - name: Run the tests
+      env:
+        TEST_LOG: ${{ runner.temp }}/jvm-test.log
+      run: |
+        java -version
+        clojure -T:build javac :with-tests true
+        clojure -M:${{ matrix.clojure }}:dev:test${{ matrix.aliases }} 2>&1 | tee "$TEST_LOG"
+
+    - name: Summarize the results
+      if: always()
+      env:
+        TEST_LOG: ${{ runner.temp }}/jvm-test.log
+      run: |
+        say() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        say "### ${{ matrix.os }}, Clojure ${{ matrix.clojure }}, Temurin ${{ matrix.jdk }}"
+        say ""
+        say "- OS: ${{ matrix.os }}"
+        say "- Clojure: ${{ matrix.clojure }}"
+        say "- Java: $(java -version 2>&1 | sed -n 2p | tr -d '\r')"
+        say "- Aliases: \`${{ matrix.aliases }}\`"
+        java_props="$(java -XshowSettings:properties -version 2>&1 | tr -d '\r')"
+        prop() { printf '%s\n' "$java_props" | sed -n "s/^ *$1 = //p" | head -n 1; }
+        tmpdir="$(prop java.io.tmpdir)"
+        spec="$(prop java.specification.version)"
+        spec="${spec#1.}"
+        say "- Temp dir: \`$tmpdir\`"
+        if [ "$RUNNER_OS" = macOS ]; then limit=104; else limit=108; fi
+        if [ "${spec%%[!0-9]*}" -ge 16 ] 2>/dev/null; then
+          flavor=jdk
+        elif [ -n "${{ contains(matrix.aliases, 'junixsocket') && 'yes' || '' }}" ]; then
+          flavor=junixsocket
+        else
+          flavor=""
+        fi
+        if [ -z "$flavor" ]; then
+          say "- Unix sockets: gated off, no unix-domain-flavor on Java $spec"
+        else
+          base="${tmpdir%[/\\]}"
+          case "$tmpdir" in *\\*) sep='\' ;; *) sep=/ ;; esac
+          random=18446744073709551615
+          longest_bytes=0
+          longest_path=""
+          consider() {
+            n="$(printf %s "$1" | LC_ALL=C wc -c | tr -d ' ')"
+            if [ "$n" -gt "$longest_bytes" ]; then
+              longest_bytes="$n"
+              longest_path="$1"
+            fi
+          }
+          for shape in 'nrepl-uri-/a&b=c+d$e,f' nrepl-sock-/listener nrepl-sock-/stale nrepl-sock-/server nrepl-sock-/nobody socket-test-/socket edn-sock-/socket; do
+            consider "$base$sep${shape%%/*}$random$sep${shape#*/}"
+          done
+          consider "target/socket-test-$random/socket"
+          if [ "$longest_bytes" -lt "$limit" ]; then verdict=fits; else verdict="TOO LONG"; fi
+          say "- Unix sockets: flavor $flavor, longest socket path $longest_bytes bytes, limit $limit, $verdict: \`$longest_path\`"
+        fi
+        if [ ! -f "$TEST_LOG" ]; then
+          say "- Result: the tests did not run"
+          exit 0
+        fi
+        count="$(sed 's/\x1b\[[0-9;]*m//g' "$TEST_LOG" | tr -d '\r' | grep -E '^[0-9]+ tests?, [0-9]+ assertions?, ' | tail -n 1 || true)"
+        if [ -z "$count" ]; then
+          say "- Result: no kaocha count line in the test output"
+          exit 1
+        fi
+        say "- Result: $count"
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: test-results-${{ matrix.os }}-clj${{ matrix.clojure }}-jdk${{ matrix.jdk }}${{ contains(matrix.aliases, 'junixsocket') && '-junixsocket' || '' }}
+        path: test-results/
+        if-no-files-found: warn
+
+  jvm-macos:
+    name: test (${{ matrix.os }}, Clojure ${{ matrix.clojure }}, Temurin ${{ matrix.jdk }}${{ matrix.aliases }})
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    runs-on: ${{ matrix.os }}
+    defaults: *jvm-defaults
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: macos-latest, clojure: '1.12', jdk: '21', aliases: ''}
+          - {os: macos-latest, clojure: '1.10', jdk: '21', aliases: ''}
+    env: *jvm-env
+    steps: *jvm-steps
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.full == 'true' || needs.changes.outputs.jvm == 'true' || needs.changes.outputs.shared == 'true' || needs.changes.outputs.clr == 'true' || needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      JAVA_OPTS: -Xmx3200m -Dclojure.main.report=stderr
+      CLOJURE_VERSION: '1.12'
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: '26'
+
+    - uses: DeLaGuardo/setup-clojure@13.7.0
+      with:
+        cli: 1.12.5.1645
+
+    - name: Cache dependencies
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.m2
+          ~/.gitlibs
+          .cpcache
+        key: jvm-lint-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+        restore-keys: |
+          jvm-lint-${{ runner.os }}-
+
+    - name: Prepare dependencies
+      run: |
+        prepare() {
+          clojure -P -T:build || return 1
+          clojure -P -M:eastwood:+junixsocket || return 1
+          clojure -P -M:cljfmt || return 1
+          clojure -P -M:kondo || return 1
+          clojure -P -M:kondo-clr || return 1
+          clojure -P -X:docs || return 1
+        }
+        attempt=1
+        until prepare; do
+          if [ "$attempt" -ge 3 ]; then
+            echo "Giving up after $attempt attempts."
+            exit 1
+          fi
+          attempt=$((attempt + 1))
+          echo "Downloading dependencies failed, retrying..."
+          sleep 5
+        done
+
+    - name: Lint with clj-kondo, cljfmt and Eastwood
+      if: needs.changes.outputs.full == 'true' || needs.changes.outputs.jvm == 'true' || needs.changes.outputs.shared == 'true'
+      run: make lint
+
+    - name: Lint the ClojureCLR branches with clj-kondo
+      if: needs.changes.outputs.full == 'true' || needs.changes.outputs.clr == 'true' || needs.changes.outputs.shared == 'true'
+      run: make kondo-clr
+
+    - name: Verify Cljdoc
+      if: needs.changes.outputs.full == 'true' || needs.changes.outputs.jvm == 'true' || needs.changes.outputs.shared == 'true'
+      run: make verify-cljdoc
+
+    - name: Verify the ops docs
+      if: needs.changes.outputs.full == 'true' || needs.changes.outputs.docs == 'true' || needs.changes.outputs.jvm == 'true' || needs.changes.outputs.shared == 'true'
+      run: make verify-docs
+
+  clr:
+    name: test (${{ matrix.os }}, ${{ matrix.role }} .NET ${{ matrix.dotnet }})
+    needs: changes
+    if: needs.changes.outputs.full == 'true' || needs.changes.outputs.clr == 'true' || needs.changes.outputs.shared == 'true'
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.informational }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, dotnet: '8.0', role: target, informational: false}
+          - {os: windows-latest, dotnet: '8.0', role: target, informational: false}
+    steps: &clr-steps
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: ${{ matrix.dotnet }}.x
+
+    - name: Install ClojureCLR and cljr
+      run: |
+        dotnet tool install --global Clojure.Main --version 1.12.6 --framework net${{ matrix.dotnet }}
+        dotnet tool install --global Clojure.Cljr --version 0.1.0-beta1 --framework net${{ matrix.dotnet }}
+
+    - name: Put the dotnet tools on PATH
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          tools="$(cygpath -w "$HOME/.dotnet/tools")"
+        else
+          tools="$HOME/.dotnet/tools"
+        fi
+        echo "$tools" >> "$GITHUB_PATH"
+
+    - name: Show the runtime ClojureCLR runs on
+      shell: bash
+      run: |
+        dotnet --list-runtimes
+        framework="$(Clojure.Main -e '(println (System.Runtime.InteropServices.RuntimeInformation/FrameworkDescription))' | tr -d '\r')"
+        echo "ClojureCLR runs on: $framework"
+        case "$framework" in
+          ".NET ${{ matrix.dotnet }}."*) ;;
+          *) echo "expected .NET ${{ matrix.dotnet }}"; exit 1 ;;
+        esac
+
+    - name: Cache git dependencies
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.gitlibs
+          .cpcache
+        key: clr-${{ runner.os }}-net${{ matrix.dotnet }}-${{ hashFiles('deps-clr.edn') }}
+        restore-keys: |
+          clr-${{ runner.os }}-net${{ matrix.dotnet }}-
+
+    - name: Build the C# helpers
+      run: dotnet build -c Release src/csharp/nrepl/nrepl.csproj
+
+    - name: Fetch dependencies
+      run: cljr -P -X:test
+
+    - name: Run the tests
+      id: test
+      timeout-minutes: 20
+      shell: bash
+      run: cljr -X:test 2>&1 | tee "$RUNNER_TEMP/clr-test.log"
+
+    - name: Summarise the environment and test counts
+      if: always()
+      shell: bash
+      env:
+        TEST_OUTCOME: ${{ steps.test.outcome }}
+        MATRIX_ROLE: ${{ matrix.role }}
+        MATRIX_DOTNET: ${{ matrix.dotnet }}
+      run: |
+        log="$RUNNER_TEMP/clr-test.log"
+        script="$RUNNER_TEMP/clr-summary.clj"
+        cat > "$script" <<'CLJ'
+        (import '(System.Runtime.InteropServices RuntimeInformation OSPlatform)
+                '(System.Net.Sockets Socket)
+                '(System.IO Path Directory)
+                '(System.Globalization CultureInfo)
+                '(System.Reflection BindingFlags))
+
+        (defn kv [k v] (println (str k "=" v)))
+
+        (defn nbytes [^String s] (.GetByteCount System.Text.Encoding/UTF8 s))
+
+        (defn cwd-after-chdir [dir]
+          (let [previous Environment/CurrentDirectory]
+            (try
+              (set! Environment/CurrentDirectory dir)
+              Environment/CurrentDirectory
+              (finally
+                (set! Environment/CurrentDirectory previous)))))
+
+        (defn socket-path [[prefix name relative?]]
+          (let [dir (Path/Combine (Path/GetTempPath) (str prefix "12345678"))]
+            (Directory/CreateDirectory dir)
+            (try
+              (str (if relative? (cwd-after-chdir dir) dir) Path/DirectorySeparatorChar name)
+              (finally
+                (Directory/Delete dir)))))
+
+        (def socket-shapes
+          [["nrepl-uri-" "a&b=c+d$e,f" false]
+           ["nrepl-sock-" "listener" false]
+           ["nrepl-sock-" "relative.sock" true]
+           ["socket-test-" "socket" false]
+           ["edn-sock-" "socket" false]])
+
+        (def tr (try (CultureInfo/GetCultureInfo "tr-TR") (catch Exception _ nil)))
+        (def tr-upper-i (when tr (.ToUpper "i" tr)))
+        (def invariant-flag
+          (some-> (.GetType (.Assembly (type System.Object)) "System.Globalization.GlobalizationMode")
+                  (.GetProperty "Invariant" (enum-or BindingFlags/Static BindingFlags/NonPublic BindingFlags/Public))
+                  (.GetValue nil nil)))
+        (def longest (apply max-key nbytes (map socket-path socket-shapes)))
+
+        (kv "framework" (RuntimeInformation/FrameworkDescription))
+        (kv "os" (RuntimeInformation/OSDescription))
+        (kv "process_arch" (RuntimeInformation/ProcessArchitecture))
+        (kv "invariant_env" (or (Environment/GetEnvironmentVariable "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT") "unset"))
+        (kv "invariant_flag" (if (nil? invariant-flag) "unreadable" invariant-flag))
+        (kv "tr_upper_i" (or tr-upper-i "tr-TR unavailable"))
+        (kv "runs_invariant" (not= "İ" tr-upper-i))
+        (kv "culture" (let [n (.Name CultureInfo/CurrentCulture)] (if (= "" n) "(invariant culture)" n)))
+        (kv "unix_sockets" Socket/OSSupportsUnixDomainSockets)
+        (kv "temp_dir" (Path/GetTempPath))
+        (kv "socket_limit" (if (RuntimeInformation/IsOSPlatform OSPlatform/OSX) 104 108))
+        (kv "socket_bytes" (nbytes longest))
+        (kv "socket_path" longest)
+        CLJ
+        status=0
+        facts=""
+        if ! facts="$(Clojure.Main "$script" | tr -d '\r')"; then
+          echo "the environment probe failed"
+          if [ "$TEST_OUTCOME" != skipped ]; then status=1; fi
+        fi
+        fact() { printf '%s\n' "$facts" | sed -n "s/^$1=//p" | head -n 1; }
+        count_line=""
+        result_line=""
+        if [ "$TEST_OUTCOME" = skipped ]; then
+          count_line="the test step did not run"
+        elif [ -f "$log" ]; then
+          count_line="$(grep -E '^Ran [0-9]+ tests containing [0-9]+ assertions\.' "$log" | tail -n 1 | tr -d '\r' || true)"
+          result_line="$(grep -E '^[0-9]+ failures, [0-9]+ errors\.' "$log" | tail -n 1 | tr -d '\r' || true)"
+        fi
+        if [ "$TEST_OUTCOME" != skipped ] && { [ -z "$count_line" ] || [ -z "$result_line" ]; }; then
+          count_line="NO COUNT LINE in the test log"
+          status=1
+        fi
+        socket_bytes="$(fact socket_bytes)"
+        socket_limit="$(fact socket_limit)"
+        if [ "$(fact unix_sockets)" != True ]; then
+          socket_text="unix-socket tests are gated off (Socket.OSSupportsUnixDomainSockets is $(fact unix_sockets))"
+        elif [ -n "$socket_bytes" ] && [ "$socket_bytes" -lt "$socket_limit" ]; then
+          socket_text="longest socket path $socket_bytes bytes, limit $socket_limit, fits: $(fact socket_path)"
+        else
+          socket_text="longest socket path $socket_bytes bytes, limit $socket_limit, TOO LONG: $(fact socket_path)"
+        fi
+        {
+          echo "### ClojureCLR on $RUNNER_OS ($RUNNER_ARCH), $MATRIX_ROLE .NET $MATRIX_DOTNET"
+          echo
+          echo "| Item | Value |"
+          echo "| --- | --- |"
+          echo "| OS | $RUNNER_OS, $(fact os) |"
+          echo "| Runner arch | $RUNNER_ARCH (.NET process $(fact process_arch)) |"
+          echo "| .NET role and version | $MATRIX_ROLE, $MATRIX_DOTNET |"
+          echo "| ClojureCLR runs on | $(fact framework) |"
+          echo "| DOTNET_SYSTEM_GLOBALIZATION_INVARIANT | $(fact invariant_env) |"
+          echo "| .NET runs invariant | $(fact runs_invariant) (GlobalizationMode.Invariant: $(fact invariant_flag); upper-case of i in tr-TR: $(fact tr_upper_i)) |"
+          echo "| Current culture | $(fact culture) |"
+          echo "| Temp dir | $(fact temp_dir) |"
+          echo "| Unix sockets | $socket_text |"
+          echo "| Test step | $TEST_OUTCOME |"
+          echo "| Count | $count_line |"
+          echo "| Result | $result_line |"
+        } | tee -a "$GITHUB_STEP_SUMMARY"
+        exit "$status"
+
+  clr-full:
+    name: test (${{ matrix.os }}, ${{ matrix.role }} .NET ${{ matrix.dotnet }})
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.informational }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, dotnet: '10.0', role: informational, informational: true}
+          - {os: windows-latest, dotnet: '10.0', role: informational, informational: true}
+          - {os: macos-latest, dotnet: '8.0', role: target, informational: false}
+          - {os: macos-latest, dotnet: '10.0', role: informational, informational: true}
+    steps: *clr-steps
+
+  codespell:
+    name: Check spelling with codespell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: codespell-project/actions-codespell@v2
+        with:
+          skip: ./test/*.txt,./plan/verify/results.org
+          ignore_words_file: codespell.txt
+  misspell:
+    name: Check spelling with misspell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install misspell
+        run: curl -sSfL https://raw.githubusercontent.com/golangci/misspell/v0.8.0/install-misspell.sh | sh -s -- -b . v0.8.0
+      - name: Misspell
+        run: ./misspell -error
