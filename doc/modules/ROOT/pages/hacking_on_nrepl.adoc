@@ -130,6 +130,29 @@ environments using Make, with the command:
 $ make test
 ----
 
+=== Running the CI matrix locally
+
+`make ci-local` runs every Linux leg of `.github/workflows/jvm.yml` and
+`.github/workflows/clr.yml` in parallel in Podman containers, from your working
+checkout, and prints a table of tests, assertions, failures and errors per leg.
+The legs, JDKs, Clojure versions and commands come from the workflow files, so
+the two cannot drift. Windows and macOS legs stay on GitHub Actions.
+
+[source,shell]
+----
+$ make ci-local                                   # every leg
+$ make ci-local LEG=1.12-temurin-8                # one leg
+$ make ci-local LEG=lint                          # lint, kondo-clr, verify-cljdoc, verify-docs
+$ make ci-local LEG=clr-net8                      # also clr-net10 (informational, as on CI)
+$ make ci-local LOOP=200 TEST=nrepl.socket-test   # one namespace, 200 times in one JVM
+----
+
+Each leg writes its output to `target/ci-local/<leg>.log`. `LOOP` runs on
+`1.12-temurin-21` unless you pass `LEG=` (JVM legs only) and exits nonzero if
+any run failed, printing the first failing run. `JOBS=N` sets how many legs
+run at once (default 8), `LEG_CPUS=N` (default 2, 0 for no limit) caps the CPUs of each leg. See `plan/verify/README.org` for the requirements and how the
+containers are laid out.
+
 == Running cljfmt
 
 Our CI build enforces consistent indentation in all source files using `cljfmt`. You can run it

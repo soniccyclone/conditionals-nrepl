@@ -1,6 +1,11 @@
-FROM docker.io/library/clojure:temurin-21-tools-deps-bookworm-slim
+ARG JDK=21
+FROM docker.io/library/clojure:temurin-${JDK}-noble
+ARG CLI_VERSION=
 ENV CLOJURE_VERSION=1.12
-RUN apt-get update \
- && apt-get install -y --no-install-recommends make git gcc libc6-dev procps \
- && rm -rf /var/lib/apt/lists/*
+RUN if [ -n "$CLI_VERSION" ]; then \
+      curl -fsSL "https://github.com/clojure/brew-install/releases/download/${CLI_VERSION}/linux-install.sh" -o /tmp/linux-install.sh \
+      && bash /tmp/linux-install.sh \
+      && rm /tmp/linux-install.sh; \
+    fi \
+ && clojure --version
 WORKDIR /work

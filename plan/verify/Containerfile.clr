@@ -1,8 +1,12 @@
-FROM mcr.microsoft.com/dotnet/sdk:8.0
+ARG DOTNET=8.0
+FROM mcr.microsoft.com/dotnet/sdk:${DOTNET}
+ARG DOTNET
+ARG CLOJURE_MAIN_VERSION=1.12.6
+ARG CLJR_VERSION=0.1.0-beta1
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_NOLOGO=1 \
     PATH="${PATH}:/root/.dotnet/tools"
-RUN dotnet tool install --global Clojure.Main --version 1.12.6 \
- && dotnet tool install --global Clojure.Cljr --version 0.1.0-beta1 \
+RUN dotnet tool install --global Clojure.Main --version ${CLOJURE_MAIN_VERSION} --framework net${DOTNET} \
+ && dotnet tool install --global Clojure.Cljr --version ${CLJR_VERSION} --framework net${DOTNET} \
  && Clojure.Main -e '(println "ClojureCLR" *clojure-version* "on" (System.Runtime.InteropServices.RuntimeInformation/FrameworkDescription))'
 WORKDIR /work

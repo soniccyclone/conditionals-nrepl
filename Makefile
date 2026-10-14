@@ -90,3 +90,7 @@ endif
 
 verify-cljdoc:
 	clojure -T:build verify-cljdoc
+
+.PHONY: ci-local
+ci-local:
+	@LEG='$(LEG)' LOOP='$(LOOP)' TEST='$(TEST)' JOBS='$(JOBS)' plan/verify/ci-local.sh
