@@ -130,13 +130,28 @@ environments using Make, with the command:
 $ make test
 ----
 
+All of CI is one GitHub Actions workflow, `.github/workflows/ci.yml`, and a pull
+request runs only the pipelines its changed files touch. A `changes` job sorts
+the diff into JVM files (`src/java`, `.clj`, `deps.edn`, `build`, `Makefile`,
+the clj-kondo and cljfmt configs), CLR files (`src/csharp`, `.cljr`,
+`deps-clr.edn`), shared files (`.cljc`, `test/clojure/nrepl/test_helpers`,
+`ci.yml` itself) and docs (`doc`, `.md`, `.adoc`, `plan`). JVM or shared changes
+run the JVM matrix on Linux and Windows; CLR or shared changes run .NET 8 on
+Linux and Windows; the lint job runs whichever of `make lint`,
+`make verify-cljdoc`, `make kondo-clr` and `make verify-docs` the changes call
+for; codespell and misspell always run. The macOS legs and the informational
+.NET 10 legs run only in a full run: every push to `master`, a manual dispatch,
+or a pull request carrying the `ci:full` label (GitHub reads the label when the
+pull request is opened, reopened or pushed to, so add it before that event). A
+new push to a branch cancels the run still going for it.
+
 === Running the CI matrix locally
 
-`make ci-local` runs every Linux leg of `.github/workflows/jvm.yml` and
-`.github/workflows/clr.yml` in parallel in Podman containers, from your working
-checkout, and prints a table of tests, assertions, failures and errors per leg.
-The legs, JDKs, Clojure versions and commands come from the workflow files, so
-the two cannot drift. Windows and macOS legs stay on GitHub Actions.
+`make ci-local` runs every Linux leg of `.github/workflows/ci.yml` in parallel
+in Podman containers, from your working checkout, and prints a table of tests,
+assertions, failures and errors per leg. The legs, JDKs, Clojure versions and
+commands come from the workflow files, so the two cannot drift. Windows and
+macOS legs stay on GitHub Actions.
 
 [source,shell]
 ----

@@ -14,5 +14,5 @@ This repository exists ONLY to create new hosted versions of nREPL. It does NOT 
 ## Working here
 
 - Plan and decisions: `plan/*.org`. Roadmap order is the `P1`..`P4` labels on the issues.
-- Local test loop: podman images `nrepl-jvm` and `nrepl-clr` from `plan/verify/`. CI (`.github/workflows/jvm.yml`, `clr.yml`) is the final confirmation on a PR, never the dev loop.
+- Local test loop: podman images `nrepl-jvm` and `nrepl-clr` from `plan/verify/`. CI (`.github/workflows/ci.yml`, path-filtered; the `ci:full` label runs everything) is the final confirmation on a PR, never the dev loop.
 - Every PR closes an issue; stacked PRs target the branch they stack on; Nathan merges.
